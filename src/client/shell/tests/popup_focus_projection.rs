@@ -46,6 +46,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
 
     state.overlay = Some(ClientShellOverlay::WorktreeCreate(
         ClientWorktreeCreateOverlay {
+            external_checkout: false,
             source_workspace_id: "ws_1".into(),
             repo_name: "repo".into(),
             branch: TextEditor::default(),
@@ -62,6 +63,7 @@ fn modal_paste_target_requires_a_focused_editable_client_field() {
 
     state.overlay = Some(ClientShellOverlay::WorktreeOpen(
         ClientWorktreeOpenOverlay {
+            external_checkout: false,
             source_workspace_id: "ws_1".into(),
             entries: Vec::new(),
             selected: 0,

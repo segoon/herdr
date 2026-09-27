@@ -15,6 +15,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
+mod external_vcs_refresh;
 mod git_refresh;
 mod ids;
 mod popup;
@@ -120,6 +121,13 @@ pub struct App {
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
     pub(crate) vcs_registry: crate::vcs::Registry,
+    pub(crate) external_vcs_refresh_in_flight: Option<u64>,
+    pub(crate) external_vcs_identity_refresh_requested: bool,
+    pub(crate) last_external_vcs_refresh: Instant,
+    pub(crate) last_external_vcs_discovery_refresh: Instant,
+    pub(crate) next_external_vcs_refresh_id: u64,
+    pub(crate) activated_vcs_providers: HashMap<String, crate::vcs::ActivatedProvider>,
+    pub(crate) external_vcs_retry_after: HashMap<String, Instant>,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
@@ -585,6 +593,14 @@ impl App {
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
             vcs_registry,
+            external_vcs_refresh_in_flight: None,
+            external_vcs_identity_refresh_requested: true,
+            last_external_vcs_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
+            last_external_vcs_discovery_refresh: Instant::now()
+                - GIT_REPO_DISCOVERY_REFRESH_INTERVAL,
+            next_external_vcs_refresh_id: 1,
+            activated_vcs_providers: HashMap::new(),
+            external_vcs_retry_after: HashMap::new(),
             pending_api_worktree_creates: HashMap::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             pending_api_worktree_removes: HashMap::new(),
@@ -954,7 +970,18 @@ impl App {
         if !invalid_section("vcs") {
             let generation = self.vcs_registry.generation().saturating_add(1);
             match crate::vcs::Registry::from_config(&config.vcs, generation) {
-                Ok(registry) => self.vcs_registry = registry,
+                Ok(registry) => {
+                    self.vcs_registry = registry;
+                    self.activated_vcs_providers.clear();
+                    self.external_vcs_retry_after.clear();
+                    self.external_vcs_identity_refresh_requested = true;
+                    self.last_external_vcs_discovery_refresh = Instant::now()
+                        .checked_sub(GIT_REPO_DISCOVERY_REFRESH_INTERVAL)
+                        .unwrap_or_else(Instant::now);
+                    self.last_external_vcs_refresh = Instant::now()
+                        .checked_sub(GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+                        .unwrap_or_else(Instant::now);
+                }
                 Err(provider_diagnostics) => {
                     diagnostics.extend(provider_diagnostics.into_iter().map(|message| {
                         format!("invalid VCS provider config: {message}; kept current vcs settings")

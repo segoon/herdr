@@ -172,6 +172,32 @@ pub(crate) fn reserve_workspace_ids(workspaces: &[Workspace]) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalVcsState {
+    pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) repository_root: PathBuf,
+    pub(crate) repository_key: String,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) checkout_directory: Option<PathBuf>,
+    pub(crate) branch: Option<String>,
+    pub(crate) ahead: Option<u64>,
+    pub(crate) behind: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CheckoutSpaceMembership {
+    pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) repository_key: String,
+    pub(crate) repository_root: PathBuf,
+    pub(crate) checkout_id: String,
+    pub(crate) checkout_name: String,
+    pub(crate) checkout_path: PathBuf,
+    pub(crate) managed: bool,
+    pub(crate) source_workspace_id: Option<String>,
+}
+
 /// A named workspace containing tabs.
 pub struct Workspace {
     /// Stable public workspace identity, independent of display order.
@@ -192,8 +218,12 @@ pub struct Workspace {
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
+    /// Cached projection from a configured non-Git VCS provider.
+    pub(crate) cached_external_vcs: Option<ExternalVcsState>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
+    /// Explicit Herdr-managed external VCS checkout provenance.
+    pub(crate) checkout_space: Option<CheckoutSpaceMembership>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
@@ -259,7 +289,9 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space,
+            cached_external_vcs: None,
             worktree_space: None,
+            checkout_space: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -411,7 +443,9 @@ impl Workspace {
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
                 cached_git_space,
+                cached_external_vcs: None,
                 worktree_space: None,
+                checkout_space: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
                 public_pane_numbers,
@@ -1200,7 +1234,9 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
+            cached_external_vcs: None,
             worktree_space: None,
+            checkout_space: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,

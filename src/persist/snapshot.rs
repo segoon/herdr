@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -57,6 +57,8 @@ pub struct WorkspaceSnapshot {
     pub identity_cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_space: Option<crate::workspace::CheckoutSpaceMembership>,
     #[serde(default)]
     pub public_pane_numbers: HashMap<u32, usize>,
     #[serde(default)]
@@ -160,6 +162,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             custom_name: snap.custom_name,
             identity_cwd,
             worktree_space: None,
+            checkout_space: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
@@ -298,6 +301,7 @@ fn capture_workspace(
         custom_name: ws.custom_name.clone(),
         identity_cwd,
         worktree_space: ws.worktree_space.clone(),
+        checkout_space: ws.checkout_space.clone(),
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
@@ -709,6 +713,7 @@ mod tests {
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
                 worktree_space: None,
+                checkout_space: None,
                 public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
                 next_public_pane_number: 3,
                 public_tab_numbers: vec![1],
@@ -785,6 +790,29 @@ mod tests {
         assert_eq!(snap.sidebar_section_split, Some(0.4));
         assert_eq!(snap.workspaces[0].active_tab, 1);
         assert_eq!(snap.workspaces[1].tabs[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn workspace_snapshot_round_trips_external_checkout_provenance() {
+        let membership = crate::workspace::CheckoutSpaceMembership {
+            provider_id: "arc".into(),
+            provider_display_name: "Arc".into(),
+            repository_key: "arc:repo".into(),
+            repository_root: PathBuf::from("/repo"),
+            checkout_id: "checkout-1".into(),
+            checkout_name: "feature".into(),
+            checkout_path: PathBuf::from("/checkouts/feature"),
+            managed: true,
+            source_workspace_id: Some("w1".into()),
+        };
+        let value = serde_json::json!({
+            "id": "w2",
+            "identity_cwd": "/checkouts/feature",
+            "checkout_space": membership,
+            "tabs": []
+        });
+        let decoded: WorkspaceSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.checkout_space, Some(membership));
     }
 
     #[test]
@@ -1374,6 +1402,7 @@ mod tests {
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
                 worktree_space: None,
+                checkout_space: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),

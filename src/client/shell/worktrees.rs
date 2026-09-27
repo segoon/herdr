@@ -15,6 +15,65 @@ fn checkout_path_preview(root: &str, repo: &str, branch: &str) -> String {
 }
 
 impl ClientShellState {
+    pub(super) fn open_external_checkout_create(
+        &mut self,
+        workspace_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        let provider_name = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| Self::endpoint_workspace_vcs(endpoint, &workspace_id))
+            .map(|vcs| vcs.provider_display_name.clone())
+            .unwrap_or_else(|| "VCS".into());
+        self.overlay = Some(ClientShellOverlay::WorktreeCreate(
+            ClientWorktreeCreateOverlay {
+                external_checkout: true,
+                source_workspace_id: workspace_id,
+                repo_name: provider_name,
+                branch: TextEditor::new("checkout", true),
+                checkout_path: String::new(),
+                error: None,
+                creating: false,
+            },
+        ));
+        outcome.repaint = true;
+    }
+
+    pub(super) fn begin_external_checkout_open(
+        &mut self,
+        workspace_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        self.push_endpoint_method_with_kind(
+            crate::api::schema::Method::CheckoutList(crate::api::schema::CheckoutListParams {
+                workspace_id: Some(workspace_id.clone()),
+                cwd: None,
+            }),
+            PendingEndpointKind::PrepareCheckoutOpen { workspace_id },
+            outcome,
+        );
+    }
+
+    pub(super) fn submit_external_checkout_remove(
+        &mut self,
+        workspace_id: String,
+        outcome: &mut ClientShellInput,
+    ) {
+        self.overlay = Some(ClientShellOverlay::WorktreeRemove(
+            ClientWorktreeRemoveOverlay {
+                external_checkout: true,
+                workspace_id,
+                path: "external checkout".into(),
+                error: None,
+                removing: false,
+                force_confirmation: false,
+            },
+        ));
+        outcome.repaint = true;
+    }
+
     fn endpoint_worktree_directory(&self) -> Option<String> {
         self.snapshot
             .as_deref()
@@ -184,6 +243,39 @@ impl ClientShellState {
         use crate::api::schema::{Method, WorktreeListParams};
         use crate::input::KeybindAction;
 
+        let external = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| Self::endpoint_workspace_vcs(endpoint, &workspace_id));
+        if let Some(vcs) = external {
+            let has = |capability: &str| vcs.capabilities.iter().any(|value| value == capability);
+            match action {
+                KeybindAction::NewWorktree if vcs.can_create_checkout && has("checkout.create") => {
+                    self.open_external_checkout_create(workspace_id, outcome);
+                }
+                KeybindAction::OpenWorktree if has("checkout.list") => {
+                    self.begin_external_checkout_open(workspace_id, outcome);
+                }
+                KeybindAction::RemoveWorktree
+                    if has("checkout.remove")
+                        && vcs
+                            .checkout
+                            .as_ref()
+                            .is_some_and(|checkout| checkout.managed) =>
+                {
+                    self.submit_external_checkout_remove(workspace_id, outcome);
+                }
+                _ => {
+                    self.set_endpoint_error(
+                        "This checkout action is not supported by the selected VCS provider.",
+                    );
+                    outcome.repaint = true;
+                }
+            }
+            return;
+        }
+
         let workspace = self.snapshot.as_deref().and_then(|snapshot| {
             snapshot
                 .workspaces
@@ -235,15 +327,17 @@ impl ClientShellState {
         let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() else {
             return;
         };
+        if create.external_checkout {
+            create.error = None;
+            return;
+        }
         create.checkout_path =
             checkout_path_preview(&worktree_directory, &create.repo_name, &create.branch);
         create.error = None;
     }
 
     pub(super) fn submit_worktree_create(&mut self, outcome: &mut ClientShellInput) {
-        let Some(worktree_directory) = self.endpoint_worktree_directory() else {
-            return;
-        };
+        let worktree_directory = self.endpoint_worktree_directory();
         let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() else {
             return;
         };
@@ -252,11 +346,46 @@ impl ClientShellState {
         }
         let branch = create.branch.trim().to_owned();
         if branch.is_empty() {
-            create.error = Some("branch is required".to_owned());
+            create.error = Some(
+                if create.external_checkout {
+                    "name is required"
+                } else {
+                    "branch is required"
+                }
+                .to_owned(),
+            );
             outcome.repaint = true;
             return;
         }
         create.branch.trim_and_accept();
+        if create.external_checkout {
+            create.creating = true;
+            create.error = None;
+            let workspace_id = create.source_workspace_id.clone();
+            if !self.push_endpoint_method_with_kind(
+                crate::api::schema::Method::CheckoutCreate(
+                    crate::api::schema::CheckoutCreateParams {
+                        workspace_id: Some(workspace_id),
+                        cwd: None,
+                        name: branch,
+                        destination: None,
+                        label: None,
+                        focus: false,
+                    },
+                ),
+                PendingEndpointKind::WorktreeCreate,
+                outcome,
+            ) {
+                if let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() {
+                    create.creating = false;
+                }
+            }
+            outcome.repaint = true;
+            return;
+        }
+        let Some(worktree_directory) = worktree_directory else {
+            return;
+        };
         create.checkout_path =
             checkout_path_preview(&worktree_directory, &create.repo_name, &branch);
         create.creating = true;
@@ -315,10 +444,20 @@ impl ClientShellState {
         };
         let workspace_id = open.source_workspace_id.clone();
         let path = entry.path.clone();
+        let checkout_id = entry.checkout_id.clone();
+        let external_checkout = open.external_checkout;
         open.selected = index;
         open.opening = true;
         open.error = None;
-        if !self.push_endpoint_method_with_kind(
+        let method = if let Some(checkout_id) = checkout_id {
+            crate::api::schema::Method::CheckoutOpen(crate::api::schema::CheckoutOpenParams {
+                workspace_id: Some(workspace_id),
+                cwd: None,
+                checkout_id,
+                label: None,
+                focus: true,
+            })
+        } else {
             crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
                 workspace_id: Some(workspace_id),
                 cwd: None,
@@ -327,8 +466,15 @@ impl ClientShellState {
                 label: None,
                 focus: true,
                 trust_repository: false,
-            }),
-            PendingEndpointKind::WorktreeOpen,
+            })
+        };
+        if !self.push_endpoint_method_with_kind(
+            method,
+            if external_checkout {
+                PendingEndpointKind::CheckoutOpen
+            } else {
+                PendingEndpointKind::WorktreeOpen
+            },
             outcome,
         ) {
             if let Some(ClientShellOverlay::WorktreeOpen(open)) = self.overlay.as_mut() {
@@ -347,15 +493,28 @@ impl ClientShellState {
         }
         let workspace_id = remove.workspace_id.clone();
         let forced = remove.force_confirmation;
+        let external_checkout = remove.external_checkout;
         remove.removing = true;
         remove.error = None;
-        if !self.push_endpoint_method_with_kind(
+        let method = if external_checkout {
+            crate::api::schema::Method::CheckoutRemove(crate::api::schema::CheckoutRemoveParams {
+                workspace_id,
+                force: forced,
+            })
+        } else {
             crate::api::schema::Method::WorktreeRemove(crate::api::schema::WorktreeRemoveParams {
                 workspace_id,
                 force: forced,
                 trust_repository: false,
-            }),
-            PendingEndpointKind::WorktreeRemove { forced },
+            })
+        };
+        if !self.push_endpoint_method_with_kind(
+            method,
+            if external_checkout {
+                PendingEndpointKind::CheckoutRemove { forced }
+            } else {
+                PendingEndpointKind::WorktreeRemove { forced }
+            },
             outcome,
         ) {
             if let Some(ClientShellOverlay::WorktreeRemove(remove)) = self.overlay.as_mut() {
@@ -390,6 +549,7 @@ impl ClientShellState {
                     checkout_path_preview(&worktree_directory, &source.repo_name, &branch);
                 self.overlay = Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
+                        external_checkout: false,
                         source_workspace_id: workspace_id,
                         repo_name: source.repo_name,
                         branch: TextEditor::new(&branch, true),
@@ -410,6 +570,7 @@ impl ClientShellState {
                     .map(|entry| {
                         let label = entry.branch.clone().unwrap_or_else(|| entry.label.clone());
                         ClientWorktreeOpenEntry {
+                            checkout_id: None,
                             path: entry.path,
                             branch: entry.branch,
                             is_linked_worktree: entry.is_linked_worktree,
@@ -424,6 +585,7 @@ impl ClientShellState {
                 } else {
                     self.overlay = Some(ClientShellOverlay::WorktreeOpen(
                         ClientWorktreeOpenOverlay {
+                            external_checkout: false,
                             source_workspace_id: workspace_id,
                             entries,
                             selected: 0,
@@ -447,6 +609,7 @@ impl ClientShellState {
                 if let Some(path) = path {
                     self.overlay = Some(ClientShellOverlay::WorktreeRemove(
                         ClientWorktreeRemoveOverlay {
+                            external_checkout: false,
                             workspace_id,
                             path,
                             error: None,
@@ -462,6 +625,40 @@ impl ClientShellState {
                 true
             }
             (
+                PendingEndpointKind::PrepareCheckoutOpen { workspace_id },
+                Ok(ResponseResult::CheckoutList { checkouts, .. }),
+            ) => {
+                let entries = checkouts
+                    .into_iter()
+                    .map(|entry| ClientWorktreeOpenEntry {
+                        checkout_id: Some(entry.id),
+                        path: entry.path,
+                        branch: None,
+                        is_linked_worktree: true,
+                        is_detached: false,
+                        open_workspace_id: entry.open_workspace_id,
+                        label: entry.name,
+                    })
+                    .collect::<Vec<_>>();
+                if entries.is_empty() {
+                    self.set_endpoint_error("No checkouts found for this repository.");
+                } else {
+                    self.overlay = Some(ClientShellOverlay::WorktreeOpen(
+                        ClientWorktreeOpenOverlay {
+                            external_checkout: true,
+                            source_workspace_id: workspace_id,
+                            entries,
+                            selected: 0,
+                            query: TextEditor::default(),
+                            search_focused: false,
+                            error: None,
+                            opening: false,
+                        },
+                    ));
+                }
+                true
+            }
+            (
                 PendingEndpointKind::WorktreeCreate,
                 Ok(ResponseResult::WorktreeCreated { tab, .. }),
             ) => {
@@ -472,6 +669,27 @@ impl ClientShellState {
                     }),
                     outcome,
                 );
+                true
+            }
+            (
+                PendingEndpointKind::WorktreeCreate,
+                Ok(ResponseResult::CheckoutCreated { tab, .. }),
+            ) => {
+                self.overlay = None;
+                self.push_endpoint_method(
+                    crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
+                        tab_id: tab.tab_id,
+                    }),
+                    outcome,
+                );
+                true
+            }
+            (PendingEndpointKind::CheckoutOpen, Ok(ResponseResult::CheckoutOpened { .. }))
+            | (
+                PendingEndpointKind::CheckoutRemove { .. },
+                Ok(ResponseResult::CheckoutRemoved { .. }),
+            ) => {
+                self.overlay = None;
                 true
             }
             (PendingEndpointKind::WorktreeOpen, Ok(ResponseResult::WorktreeOpened { .. }))
@@ -493,6 +711,42 @@ impl ClientShellState {
                 if let Some(ClientShellOverlay::WorktreeOpen(open)) = self.overlay.as_mut() {
                     open.opening = false;
                     open.error = Some(error.message);
+                }
+                true
+            }
+            (PendingEndpointKind::CheckoutOpen, Err(error)) => {
+                if let Some(ClientShellOverlay::WorktreeOpen(open)) = self.overlay.as_mut() {
+                    open.opening = false;
+                    open.error = Some(error.message);
+                }
+                true
+            }
+            (PendingEndpointKind::CheckoutRemove { forced: false }, Err(error))
+                if error.code.as_deref() == Some("dirty_checkout_requires_force") =>
+            {
+                if let Some(ClientShellOverlay::WorktreeRemove(remove)) = self.overlay.as_mut() {
+                    let can_force = self
+                        .endpoints
+                        .iter()
+                        .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+                        .and_then(|endpoint| {
+                            Self::endpoint_workspace_vcs(endpoint, &remove.workspace_id)
+                        })
+                        .is_some_and(|vcs| {
+                            vcs.capabilities
+                                .iter()
+                                .any(|capability| capability == "checkout.remove.force")
+                        });
+                    remove.removing = false;
+                    remove.force_confirmation = can_force;
+                    remove.error = (!can_force).then_some(error.message);
+                }
+                true
+            }
+            (PendingEndpointKind::CheckoutRemove { .. }, Err(error)) => {
+                if let Some(ClientShellOverlay::WorktreeRemove(remove)) = self.overlay.as_mut() {
+                    remove.removing = false;
+                    remove.error = Some(error.message);
                 }
                 true
             }
@@ -518,7 +772,8 @@ impl ClientShellState {
             (
                 PendingEndpointKind::PrepareWorktreeCreate { .. }
                 | PendingEndpointKind::PrepareWorktreeOpen { .. }
-                | PendingEndpointKind::PrepareWorktreeRemove { .. },
+                | PendingEndpointKind::PrepareWorktreeRemove { .. }
+                | PendingEndpointKind::PrepareCheckoutOpen { .. },
                 Err(_),
             ) => true,
             (_, Ok(_)) => {

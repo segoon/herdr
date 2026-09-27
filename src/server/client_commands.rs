@@ -13,6 +13,10 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
+    "checkout.create",
+    "checkout.list",
+    "checkout.open",
+    "checkout.remove",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -296,6 +300,22 @@ mod tests {
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        assert_eq!(
+            actual.remove("checkout.create").as_deref(),
+            Some("4098da70e647b551236ee5fc3587f62cb3d88bf6dab7cb047594d6bf7add8557")
+        );
+        assert_eq!(
+            actual.remove("checkout.list").as_deref(),
+            Some("63a72501be086fa88b14590fc20f963c378b83bdec2b7b79a57f37d6bd3d6c91")
+        );
+        assert_eq!(
+            actual.remove("checkout.open").as_deref(),
+            Some("b2186c306bdf1e76827f3a9c84f54096f8e10723be70b828926c570af83897ca")
+        );
+        assert_eq!(
+            actual.remove("checkout.remove").as_deref(),
+            Some("1c06029ecea7f6d286c30b444e3a9bc70011740257a2d5dd9ad9a86b1715871b")
         );
 
         assert_eq!(

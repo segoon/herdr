@@ -267,6 +267,48 @@ pub(super) fn snapshot_with_completions(
     (shell, completions)
 }
 
+pub(super) fn vcs_projection(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+) -> protocol::endpoint::EndpointVcsProjection {
+    let workspaces = app
+        .state
+        .workspaces
+        .iter()
+        .filter_map(|workspace| {
+            let vcs = workspace.cached_external_vcs.as_ref()?;
+            Some((
+                workspace.id.clone(),
+                protocol::endpoint::EndpointWorkspaceVcs {
+                    provider_id: vcs.provider_id.clone(),
+                    provider_display_name: vcs.provider_display_name.clone(),
+                    repository_key: vcs.repository_key.clone(),
+                    branch: vcs.branch.clone(),
+                    ahead: vcs.ahead,
+                    behind: vcs.behind,
+                    capabilities: vcs.capabilities.clone(),
+                    can_create_checkout: vcs.checkout_directory.is_some()
+                        && vcs.capabilities.iter().any(|cap| cap == "checkout.create"),
+                    checkout: workspace.checkout_space.as_ref().map(|checkout| {
+                        protocol::endpoint::EndpointWorkspaceCheckout {
+                            id: checkout.checkout_id.clone(),
+                            name: checkout.checkout_name.clone(),
+                            managed: checkout.managed,
+                            is_source: checkout.source_workspace_id.is_none(),
+                        }
+                    }),
+                },
+            ))
+        })
+        .collect();
+    protocol::endpoint::EndpointVcsProjection {
+        boot_id: boot_id.to_owned(),
+        revision,
+        workspaces,
+    }
+}
+
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,

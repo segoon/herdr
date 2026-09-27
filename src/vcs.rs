@@ -38,6 +38,7 @@ const MAX_CONCURRENT_PROVIDER_PROCESSES: usize = 4;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
+const MAX_STATUS_TEXT_BYTES: usize = 4096;
 const MIN_TIMEOUT_MS: u64 = 50;
 const MAX_STATUS_TIMEOUT_MS: u64 = 30_000;
 const MAX_OPERATION_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
@@ -63,7 +64,7 @@ impl Capability {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
             Self::CheckoutList => "checkout.list",
@@ -160,8 +161,23 @@ impl ExternalProvider {
                         "inspect response exceeds {MAX_BATCH_ITEMS} items"
                     )));
                 }
+                let mut seen_roots = HashSet::new();
                 for item in &items {
-                    validate_response_path(&item.root)?;
+                    let root = validate_response_path(&item.root)?;
+                    if !seen_roots.insert(root) {
+                        return Err(ProviderFailure::Protocol(
+                            "inspect response contains a duplicate root".into(),
+                        ));
+                    }
+                    if item
+                        .branch
+                        .as_ref()
+                        .is_some_and(|branch| branch.len() > MAX_STATUS_TEXT_BYTES)
+                    {
+                        return Err(ProviderFailure::Protocol(format!(
+                            "inspect branch exceeds {MAX_STATUS_TEXT_BYTES} bytes"
+                        )));
+                    }
                 }
                 Ok(items)
             }
@@ -189,8 +205,20 @@ impl ExternalProvider {
                         "checkout.list response exceeds {MAX_BATCH_ITEMS} items"
                     )));
                 }
+                let mut seen_ids = HashSet::new();
+                let mut seen_paths = HashSet::new();
                 for checkout in &checkouts {
-                    validate_checkout(checkout)?;
+                    let path = validate_checkout(checkout)?;
+                    if !seen_ids.insert(&checkout.id) {
+                        return Err(ProviderFailure::Protocol(
+                            "checkout.list response contains a duplicate checkout id".into(),
+                        ));
+                    }
+                    if !seen_paths.insert(path) {
+                        return Err(ProviderFailure::Protocol(
+                            "checkout.list response contains a duplicate checkout path".into(),
+                        ));
+                    }
                 }
                 Ok(checkouts)
             }
@@ -416,7 +444,7 @@ fn validate_response_path(path: &ExactPath) -> Result<PathBuf, ProviderFailure> 
     }
 }
 
-fn validate_checkout(checkout: &Checkout) -> Result<(), ProviderFailure> {
+fn validate_checkout(checkout: &Checkout) -> Result<PathBuf, ProviderFailure> {
     if checkout.id.is_empty() || checkout.id.len() > 512 {
         return Err(ProviderFailure::Protocol(
             "checkout id must contain 1-512 bytes".into(),
@@ -427,8 +455,23 @@ fn validate_checkout(checkout: &Checkout) -> Result<(), ProviderFailure> {
             "checkout name must contain 1-256 bytes".into(),
         ));
     }
-    validate_response_path(&checkout.path)?;
-    Ok(())
+    validate_response_path(&checkout.path)
+}
+
+/// Stable, lossless identity for grouping repositories in projections and
+/// persisted checkout membership. The tag avoids ambiguity between native path
+/// encodings while base64 keeps arbitrary UTF-8 provider IDs and paths safe.
+pub(crate) fn repository_key(provider_id: &str, root: &Path) -> String {
+    let provider = base64::engine::general_purpose::STANDARD.encode(provider_id.as_bytes());
+    let (encoding, value) = match ExactPath::from_path(root) {
+        ExactPath::Utf8(value) => (
+            "utf8",
+            base64::engine::general_purpose::STANDARD.encode(value.as_bytes()),
+        ),
+        ExactPath::UnixBytesBase64(value) => ("unix", value),
+        ExactPath::WindowsUtf16LeBase64(value) => ("windows", value),
+    };
+    format!("{provider}:{encoding}:{value}")
 }
 
 async fn read_capped<R>(reader: R, limit: usize) -> Result<Vec<u8>, ProviderFailure>
@@ -479,6 +522,17 @@ impl ActivatedProvider {
 
     pub(crate) fn display_name(&self) -> &str {
         self.provider.display_name()
+    }
+
+    pub(crate) fn checkout_directory(&self) -> Option<&Path> {
+        self.provider.checkout_directory()
+    }
+
+    pub(crate) fn capability_names(&self) -> Vec<String> {
+        self.effective_capabilities
+            .iter()
+            .map(|capability| capability.as_str().to_owned())
+            .collect()
     }
 
     pub(crate) fn supports(&self, capability: Capability) -> bool {
@@ -541,7 +595,7 @@ impl ActivatedProvider {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Registry {
     generation: u64,
     providers: Vec<ExternalProvider>,
@@ -612,6 +666,10 @@ impl Registry {
 
     pub(crate) fn providers(&self) -> &[ExternalProvider] {
         &self.providers
+    }
+
+    pub(crate) fn provider(&self, id: &str) -> Option<&ExternalProvider> {
+        self.providers.iter().find(|provider| provider.id() == id)
     }
 
     /// Discover a configured external provider without executing it.

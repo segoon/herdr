@@ -604,7 +604,7 @@ impl App {
         pane_updates
     }
 
-    fn restore_shutdown_worktree_panes(
+    pub(crate) fn restore_shutdown_worktree_panes(
         &mut self,
         shutdown_panes: &[crate::layout::PaneId],
         operation_id: u64,

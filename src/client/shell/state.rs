@@ -424,6 +424,7 @@ pub(super) struct ClientSettingsOverlay {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeCreateOverlay {
+    pub(super) external_checkout: bool,
     pub(super) source_workspace_id: String,
     pub(super) repo_name: String,
     pub(super) branch: TextEditor,
@@ -434,6 +435,7 @@ pub(super) struct ClientWorktreeCreateOverlay {
 
 #[derive(Debug, Clone)]
 pub(super) struct ClientWorktreeOpenEntry {
+    pub(super) checkout_id: Option<String>,
     pub(super) path: String,
     pub(super) branch: Option<String>,
     pub(super) is_linked_worktree: bool,
@@ -472,6 +474,7 @@ impl ClientWorktreeOpenEntry {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeOpenOverlay {
+    pub(super) external_checkout: bool,
     pub(super) source_workspace_id: String,
     pub(super) entries: Vec<ClientWorktreeOpenEntry>,
     pub(super) selected: usize,
@@ -501,6 +504,7 @@ impl ClientWorktreeOpenOverlay {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeRemoveOverlay {
+    pub(super) external_checkout: bool,
     pub(super) workspace_id: String,
     pub(super) path: String,
     pub(super) error: Option<String>,
@@ -515,6 +519,9 @@ pub(super) enum ClientContextMenuAction {
     NewWorktree,
     OpenWorktree,
     RemoveWorktree,
+    NewCheckout,
+    OpenCheckout,
+    RemoveCheckout,
     ToggleGroup,
     NewTab,
     RenamePane,
@@ -535,6 +542,12 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+    },
+    ExternalWorkspace {
+        workspace_id: String,
+        can_create: bool,
+        can_list: bool,
+        can_remove: bool,
     },
     Tab {
         tab_id: String,
@@ -637,6 +650,13 @@ pub(super) enum PendingEndpointKind {
     WorktreeCreate,
     WorktreeOpen,
     WorktreeRemove {
+        forced: bool,
+    },
+    PrepareCheckoutOpen {
+        workspace_id: String,
+    },
+    CheckoutOpen,
+    CheckoutRemove {
         forced: bool,
     },
     SelectionCopy,

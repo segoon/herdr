@@ -145,6 +145,18 @@ Herdr understands it, the config allows it, and the provider advertises it from
 Unknown advertised capabilities are ignored. See [External VCS provider
 protocol](/docs/vcs-provider-protocol/) for the JSON contract.
 
+When a configured provider matches a workspace, Herdr displays its normalized
+branch and ahead/behind values in the existing sidebar tokens. Checkout actions
+are capability-driven: `New checkout`, `Open checkout...`, and `Delete checkout...`
+appear only when the provider and server support the corresponding operation.
+Git keeps its existing worktree wording and behavior.
+
+Checkout creation uses the provider's `checkout_directory`; the provider maps
+the entered checkout name to its own branch, stream, bookmark, or workspace
+model. Opening uses the opaque checkout ID returned by the provider. Herdr never
+deletes an external checkout directory itself, and removal is available only for
+entries the provider reports as managed.
+
 ## Remote attach
 
 Remote attach manages its SSH connection with temporary keepalives and, where supported, connection reuse by default.

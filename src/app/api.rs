@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod checkouts;
 mod env;
 mod integrations;
 mod layouts;
@@ -33,6 +34,23 @@ impl App {
                 results,
                 cache_updates,
             } => self.handle_git_status_refreshed(results, cache_updates),
+            AppEvent::ExternalVcsRefreshed {
+                generation,
+                task_id,
+                results,
+                activations,
+                failures,
+            } => self.handle_external_vcs_refreshed(
+                generation,
+                task_id,
+                results,
+                activations,
+                failures,
+            ),
+            AppEvent::ExternalCheckoutFinished(result) => {
+                self.handle_external_checkout_finished(*result);
+                true
+            }
             AppEvent::TabBarCommandFinished {
                 generation,
                 segment_index,
@@ -82,6 +100,69 @@ impl App {
         changed
     }
 
+    fn handle_external_vcs_refreshed(
+        &mut self,
+        generation: u64,
+        task_id: u64,
+        results: Vec<crate::events::ExternalVcsRefreshResult>,
+        activations: Vec<crate::vcs::ActivatedProvider>,
+        failures: Vec<String>,
+    ) -> bool {
+        if self.external_vcs_refresh_in_flight != Some(task_id) {
+            return false;
+        }
+        self.external_vcs_refresh_in_flight = None;
+        if generation != self.vcs_registry.generation() {
+            return false;
+        }
+        for provider in activations {
+            self.external_vcs_retry_after.remove(provider.id());
+            self.activated_vcs_providers
+                .insert(provider.id().to_owned(), provider);
+        }
+        let failed_providers = failures
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let retry_at = Instant::now() + Duration::from_secs(30);
+        for provider_id in &failed_providers {
+            self.external_vcs_retry_after
+                .insert(provider_id.clone(), retry_at);
+        }
+        let mut by_workspace = results
+            .into_iter()
+            .map(|result| (result.workspace_id.clone(), result))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut changed = false;
+        for workspace in &mut self.state.workspaces {
+            let next = by_workspace.remove(&workspace.id).and_then(|result| {
+                (workspace
+                    .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+                    == Some(result.resolved_identity_cwd))
+                .then_some(result.state)
+                .flatten()
+            });
+            let next = if next.is_none()
+                && workspace
+                    .cached_external_vcs
+                    .as_ref()
+                    .is_some_and(|state| failed_providers.contains(&state.provider_id))
+            {
+                workspace.cached_external_vcs.clone()
+            } else {
+                next
+            };
+            if workspace.cached_external_vcs != next {
+                workspace.cached_external_vcs = next;
+                changed = true;
+            }
+        }
+        if changed {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changed
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         let _ = self.handle_internal_event_with_pane_updates(ev);
     }
@@ -120,6 +201,23 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(results, cache_updates);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalVcsRefreshed {
+            generation,
+            task_id,
+            results,
+            activations,
+            failures,
+        } = ev
+        {
+            self.handle_external_vcs_refreshed(generation, task_id, results, activations, failures);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalCheckoutFinished(result) = ev {
+            self.handle_external_checkout_finished(*result);
             return Vec::new();
         }
 
@@ -1068,6 +1166,16 @@ impl App {
                     request.id,
                     "invalid_request",
                     "worktree.remove is handled asynchronously by the app runtime",
+                );
+            }
+            Method::CheckoutList(_)
+            | Method::CheckoutCreate(_)
+            | Method::CheckoutOpen(_)
+            | Method::CheckoutRemove(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "checkout operation is handled asynchronously by the app runtime",
                 );
             }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),

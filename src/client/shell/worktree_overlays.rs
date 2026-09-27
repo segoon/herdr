@@ -12,7 +12,11 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y,
         inner.width,
-        "new worktree",
+        if create.external_checkout {
+            "new checkout"
+        } else {
+            "new worktree"
+        },
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
@@ -23,7 +27,11 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 2,
         inner.width,
-        " branch",
+        if create.external_checkout {
+            " name"
+        } else {
+            " branch"
+        },
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     let input = Rect::new(inner.x, inner.y + 3, inner.width, 1);
@@ -39,7 +47,11 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 5,
         inner.width,
-        " checkout",
+        if create.external_checkout {
+            " provider"
+        } else {
+            " checkout"
+        },
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     put_text(
@@ -47,7 +59,14 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 6,
         inner.width,
-        &format!(" {}", create.checkout_path),
+        &format!(
+            " {}",
+            if create.external_checkout {
+                &create.repo_name
+            } else {
+                &create.checkout_path
+            }
+        ),
         Style::default().fg(p.subtext0).bg(p.panel_bg),
     );
     if create.creating {
@@ -119,7 +138,11 @@ pub(super) fn render_worktree_open_overlay(
         inner.x,
         inner.y,
         inner.width,
-        "open worktree",
+        if open.external_checkout {
+            "open checkout"
+        } else {
+            "open worktree"
+        },
         Style::default()
             .fg(p.text)
             .bg(p.panel_bg)
@@ -137,7 +160,11 @@ pub(super) fn render_worktree_open_overlay(
         } else if !open.query.is_empty() {
             format!(" / {}", open.query)
         } else {
-            " / filter worktrees".to_owned()
+            if open.external_checkout {
+                " / filter checkouts".to_owned()
+            } else {
+                " / filter worktrees".to_owned()
+            }
         },
         Style::default()
             .fg(if open.search_focused {
@@ -245,7 +272,11 @@ pub(super) fn render_worktree_open_overlay(
             body.x,
             body.y,
             body.width,
-            " no matching worktrees",
+            if open.external_checkout {
+                " no matching checkouts"
+            } else {
+                " no matching worktrees"
+            },
             Style::default().fg(p.overlay0).bg(p.panel_bg),
         );
     }
@@ -317,7 +348,11 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y,
         inner.width,
-        " delete worktree checkout?",
+        if remove.external_checkout {
+            " delete checkout?"
+        } else {
+            " delete worktree checkout?"
+        },
         Style::default()
             .fg(p.red)
             .bg(p.panel_bg)
@@ -344,7 +379,11 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y + 3,
         inner.width,
-        " The branch is not deleted. The Herdr workspace will close.",
+        if remove.external_checkout {
+            " The provider removes the checkout. The Herdr workspace will close."
+        } else {
+            " The branch is not deleted. The Herdr workspace will close."
+        },
         Style::default().fg(p.text).bg(p.panel_bg),
     );
     if remove.force_confirmation {

@@ -10,6 +10,7 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
+    VcsProjection(crate::protocol::endpoint::EndpointVcsProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
 }
@@ -52,6 +53,11 @@ pub(crate) fn decode_endpoint_control(
                 view,
             },
         ));
+    }
+    if kind == crate::protocol::endpoint::VCS_PROJECTION_KIND {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::VcsProjection)
+            .unwrap_or(EndpointControlMessage::Ignored));
     }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
         let snapshot = serde_json::from_str(data)
@@ -160,6 +166,15 @@ mod tests {
                 "not json"
             )
             .unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+    }
+
+    #[test]
+    fn malformed_vcs_projection_is_ignored() {
+        assert!(matches!(
+            decode_endpoint_control(crate::protocol::endpoint::VCS_PROJECTION_KIND, "not json")
+                .unwrap(),
             EndpointControlMessage::Ignored
         ));
     }

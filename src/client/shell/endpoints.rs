@@ -9,6 +9,12 @@ pub(crate) struct ClientEndpointAgentViewProjection {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ClientEndpointVcsProjection {
+    generation: Option<u64>,
+    pub(crate) projection: crate::protocol::endpoint::EndpointVcsProjection,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ClientShellEndpoint {
     pub(crate) endpoint_id: ClientEndpointId,
     pub(crate) label: String,
@@ -20,6 +26,8 @@ pub(crate) struct ClientShellEndpoint {
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) agent_view_projection: Option<ClientEndpointAgentViewProjection>,
     pending_agent_view_projection: Option<ClientEndpointAgentViewProjection>,
+    pub(crate) vcs_projection: Option<ClientEndpointVcsProjection>,
+    pending_vcs_projection: Option<ClientEndpointVcsProjection>,
     pub(crate) agent_view_projection_supported: bool,
     pub(crate) methods: Option<HashSet<String>>,
 }
@@ -80,6 +88,9 @@ impl ClientShellState {
                     .and_then(|endpoint| endpoint.agent_view_projection.clone()),
                 pending_agent_view_projection: previous
                     .and_then(|endpoint| endpoint.pending_agent_view_projection.clone()),
+                vcs_projection: previous.and_then(|endpoint| endpoint.vcs_projection.clone()),
+                pending_vcs_projection: previous
+                    .and_then(|endpoint| endpoint.pending_vcs_projection.clone()),
                 agent_view_projection_supported: previous
                     .is_some_and(|endpoint| endpoint.agent_view_projection_supported),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
@@ -127,6 +138,8 @@ impl ClientShellState {
             endpoint.agent_presentation = Default::default();
             endpoint.agent_view_projection = None;
             endpoint.pending_agent_view_projection = None;
+            endpoint.vcs_projection = None;
+            endpoint.pending_vcs_projection = None;
             endpoint.agent_view_projection_supported = false;
         }
     }
@@ -334,6 +347,58 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_endpoint_vcs_projection(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        projection: crate::protocol::endpoint::EndpointVcsProjection,
+    ) {
+        let Some(index) = self
+            .endpoints
+            .iter()
+            .position(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        let endpoint = &mut self.endpoints[index];
+        if endpoint.snapshot_generation == Some(generation)
+            && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                snapshot.boot_id == projection.boot_id && snapshot.revision > projection.revision
+            })
+        {
+            return;
+        }
+        let next = ClientEndpointVcsProjection {
+            generation: Some(generation),
+            projection,
+        };
+        let matches = endpoint.snapshot_generation == next.generation
+            && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                snapshot.boot_id == next.projection.boot_id
+                    && snapshot.revision == next.projection.revision
+            });
+        if matches {
+            endpoint.vcs_projection = Some(next);
+            merge_vcs_projection(endpoint);
+        } else {
+            endpoint.pending_vcs_projection = Some(next);
+        }
+        self.apply_cached_endpoint_snapshot(endpoint_id);
+    }
+
+    pub(crate) fn endpoint_workspace_vcs<'a>(
+        endpoint: &'a ClientShellEndpoint,
+        workspace_id: &str,
+    ) -> Option<&'a crate::protocol::endpoint::EndpointWorkspaceVcs> {
+        let snapshot = endpoint.snapshot.as_deref()?;
+        let projection = endpoint.vcs_projection.as_ref()?;
+        (projection.generation == endpoint.snapshot_generation
+            && projection.projection.boot_id == snapshot.boot_id
+            && projection.projection.revision == snapshot.revision)
+            .then(|| projection.projection.workspaces.get(workspace_id))
+            .flatten()
+    }
+
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -486,11 +551,15 @@ impl ClientShellState {
     }
 
     pub(super) fn supports_endpoint_method(&self, method: &crate::api::schema::Method) -> bool {
+        self.supports_endpoint_method_name(crate::api::api_method_name(method))
+    }
+
+    pub(super) fn supports_endpoint_method_name(&self, method: &str) -> bool {
         self.endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
             .and_then(|endpoint| endpoint.methods.as_ref())
-            .is_none_or(|methods| methods.contains(crate::api::api_method_name(method)))
+            .is_none_or(|methods| methods.contains(method))
     }
 
     pub(super) fn focused_tab_count(&self) -> usize {
@@ -646,6 +715,32 @@ impl ClientShellState {
                 endpoint.agent_view_projection = None;
             }
         }
+        let pending_vcs_matches =
+            endpoint
+                .pending_vcs_projection
+                .as_ref()
+                .is_some_and(|projection| {
+                    projection.generation == generation
+                        && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                            projection.projection.boot_id == snapshot.boot_id
+                                && projection.projection.revision == snapshot.revision
+                        })
+                });
+        if pending_vcs_matches {
+            endpoint.vcs_projection = endpoint.pending_vcs_projection.take();
+            merge_vcs_projection(endpoint);
+        } else {
+            endpoint.pending_vcs_projection = None;
+            if endpoint.vcs_projection.as_ref().is_some_and(|projection| {
+                projection.generation != generation
+                    || endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                        projection.projection.boot_id != snapshot.boot_id
+                            || projection.projection.revision != snapshot.revision
+                    })
+            }) {
+                endpoint.vcs_projection = None;
+            }
+        }
     }
 
     pub(crate) fn acknowledge_active_surface_agents(&mut self, surface: &PaneSurfaceFrame) -> bool {
@@ -711,6 +806,45 @@ impl ClientShellState {
     }
 }
 
+fn merge_vcs_projection(endpoint: &mut ClientShellEndpoint) {
+    let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+        return;
+    };
+    let Some(projection) = endpoint.vcs_projection.as_ref() else {
+        return;
+    };
+    if projection.generation != endpoint.snapshot_generation
+        || projection.projection.boot_id != snapshot.boot_id
+        || projection.projection.revision != snapshot.revision
+    {
+        return;
+    }
+    for workspace in &mut snapshot.workspaces {
+        let Some(vcs) = projection
+            .projection
+            .workspaces
+            .get(&workspace.workspace_id)
+        else {
+            continue;
+        };
+        workspace.branch = vcs.branch.clone();
+        workspace.git_ahead_behind = match (vcs.ahead, vcs.behind) {
+            (Some(ahead), Some(behind)) => Some((
+                usize::try_from(ahead).unwrap_or(usize::MAX),
+                usize::try_from(behind).unwrap_or(usize::MAX),
+            )),
+            _ => None,
+        };
+        if let Some(checkout) = vcs.checkout.as_ref() {
+            workspace.worktree = Some(crate::protocol::ClientShellWorktree {
+                key: vcs.repository_key.clone(),
+                label: vcs.provider_display_name.clone(),
+                is_linked_worktree: !checkout.is_source,
+            });
+        }
+    }
+}
+
 pub(super) fn endpoint_status_presentation(
     status: ClientEndpointStatus,
     palette: &Palette,
@@ -735,6 +869,8 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         agent_presentation: Default::default(),
         agent_view_projection: None,
         pending_agent_view_projection: None,
+        vcs_projection: None,
+        pending_vcs_projection: None,
         agent_view_projection_supported: false,
         methods: None,
     }
