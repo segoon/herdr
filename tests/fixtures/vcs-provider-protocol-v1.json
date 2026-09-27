@@ -1,0 +1,17 @@
+{
+  "requests": {
+    "describe": {"protocol_version":1,"request_id":1,"operation":"describe"},
+    "inspect": {"protocol_version":1,"request_id":2,"operation":"inspect","roots":[{"encoding":"utf8","value":"/repo"}]},
+    "checkout.list": {"protocol_version":1,"request_id":3,"operation":"checkout.list","root":{"encoding":"utf8","value":"/repo"}},
+    "checkout.create": {"protocol_version":1,"request_id":4,"operation":"checkout.create","root":{"encoding":"utf8","value":"/repo"},"name":"topic","destination":{"encoding":"utf8","value":"/checkouts/topic"}},
+    "checkout.remove": {"protocol_version":1,"request_id":5,"operation":"checkout.remove","root":{"encoding":"utf8","value":"/repo"},"checkout":{"encoding":"utf8","value":"/checkouts/topic"},"force":false}
+  },
+  "responses": {
+    "describe": {"protocol_version":1,"request_id":1,"status":"ok","response":{"operation":"describe","capabilities":["inspect","checkout.list"]}},
+    "inspect": {"protocol_version":1,"request_id":2,"status":"ok","response":{"operation":"inspect","items":[{"root":{"encoding":"utf8","value":"/repo"},"branch":"main","ahead":1,"behind":0}]}},
+    "checkout.list": {"protocol_version":1,"request_id":3,"status":"ok","response":{"operation":"checkout.list","checkouts":[{"id":"topic","name":"topic","path":{"encoding":"utf8","value":"/checkouts/topic"},"managed":true}]}},
+    "checkout.create": {"protocol_version":1,"request_id":4,"status":"ok","response":{"operation":"checkout.create","checkout":{"id":"topic","name":"topic","path":{"encoding":"utf8","value":"/checkouts/topic"},"managed":true}}},
+    "checkout.remove": {"protocol_version":1,"request_id":5,"status":"ok","response":{"operation":"checkout.remove"}},
+    "error": {"protocol_version":1,"request_id":5,"status":"error","error":{"code":"checkout_dirty","message":"checkout contains local changes","retryable":false}}
+  }
+}

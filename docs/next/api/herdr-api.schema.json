@@ -4450,6 +4450,18 @@
           ],
           "type": "string"
         },
+        "VcsStatusInterestSetParams": {
+          "description": "Updates whether the requesting client needs periodically refreshed VCS status.",
+          "properties": {
+            "interested": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "interested"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4981,6 +4993,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/ClientShellSurfaceSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "vcs.status_interest.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VcsStatusInterestSetParams"
             }
           },
           "required": [
@@ -10715,6 +10743,22 @@
                 "type",
                 "active",
                 "projection_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "interested": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "vcs_status_interest_set",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "interested"
               ],
               "type": "object"
             },

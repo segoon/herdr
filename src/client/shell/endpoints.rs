@@ -236,7 +236,7 @@ impl ClientShellState {
         if endpoint.status != ClientEndpointStatus::Online {
             return false;
         }
-        let Some(snapshot) = endpoint.snapshot.clone() else {
+        let Some(snapshot) = endpoint_presentation_snapshot(endpoint) else {
             return false;
         };
         let generation = endpoint.snapshot_generation;
@@ -379,7 +379,6 @@ impl ClientShellState {
             });
         if matches {
             endpoint.vcs_projection = Some(next);
-            merge_vcs_projection(endpoint);
         } else {
             endpoint.pending_vcs_projection = Some(next);
         }
@@ -728,7 +727,6 @@ impl ClientShellState {
                 });
         if pending_vcs_matches {
             endpoint.vcs_projection = endpoint.pending_vcs_projection.take();
-            merge_vcs_projection(endpoint);
         } else {
             endpoint.pending_vcs_projection = None;
             if endpoint.vcs_projection.as_ref().is_some_and(|projection| {
@@ -792,9 +790,7 @@ impl ClientShellState {
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
             .and_then(|endpoint| {
-                endpoint
-                    .snapshot
-                    .clone()
+                endpoint_presentation_snapshot(endpoint)
                     .map(|snapshot| (snapshot, endpoint.snapshot_generation))
             })
         else {
@@ -806,18 +802,22 @@ impl ClientShellState {
     }
 }
 
-fn merge_vcs_projection(endpoint: &mut ClientShellEndpoint) {
-    let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
-        return;
-    };
+/// Builds the legacy shell view from immutable transport snapshots and optional
+/// neutral VCS facts. Endpoint caches remain wire-exact; only this disposable
+/// presentation copy maps provider-neutral branch/checkout facts onto the
+/// generation-1 shell fields understood by existing layout code.
+fn endpoint_presentation_snapshot(
+    endpoint: &ClientShellEndpoint,
+) -> Option<Box<ClientShellSnapshot>> {
+    let mut snapshot = endpoint.snapshot.clone()?;
     let Some(projection) = endpoint.vcs_projection.as_ref() else {
-        return;
+        return Some(snapshot);
     };
     if projection.generation != endpoint.snapshot_generation
         || projection.projection.boot_id != snapshot.boot_id
         || projection.projection.revision != snapshot.revision
     {
-        return;
+        return Some(snapshot);
     }
     for workspace in &mut snapshot.workspaces {
         let Some(vcs) = projection
@@ -843,6 +843,7 @@ fn merge_vcs_projection(endpoint: &mut ClientShellEndpoint) {
             });
         }
     }
+    Some(snapshot)
 }
 
 pub(super) fn endpoint_status_presentation(

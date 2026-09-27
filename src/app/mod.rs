@@ -128,13 +128,10 @@ pub struct App {
     pub(crate) next_external_vcs_refresh_id: u64,
     pub(crate) activated_vcs_providers: HashMap<String, crate::vcs::ActivatedProvider>,
     pub(crate) external_vcs_retry_after: HashMap<String, Instant>,
-    pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
+    pub(crate) checkout_requests: api::checkout_requests::CheckoutRequests,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
-    pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_worktree_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
     pub(crate) pending_worktree_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
-    pub(crate) next_api_worktree_operation_id: u64,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
@@ -601,13 +598,10 @@ impl App {
             next_external_vcs_refresh_id: 1,
             activated_vcs_providers: HashMap::new(),
             external_vcs_retry_after: HashMap::new(),
-            pending_api_worktree_creates: HashMap::new(),
+            checkout_requests: api::checkout_requests::CheckoutRequests::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
-            pending_api_worktree_removes: HashMap::new(),
-            pending_api_worktree_remove_paths: HashMap::new(),
             pending_worktree_remove_runtime_exits: HashMap::new(),
             pending_worktree_remove_runtime_restores: HashMap::new(),
-            next_api_worktree_operation_id: 1,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             next_agent_manifest_update_check: manifest_check_enabled
@@ -974,6 +968,9 @@ impl App {
                     self.vcs_registry = registry;
                     self.activated_vcs_providers.clear();
                     self.external_vcs_retry_after.clear();
+                    for workspace in &mut self.state.workspaces {
+                        workspace.cached_external_vcs = None;
+                    }
                     self.external_vcs_identity_refresh_requested = true;
                     self.last_external_vcs_discovery_refresh = Instant::now()
                         .checked_sub(GIT_REPO_DISCOVERY_REFRESH_INTERVAL)
@@ -1837,6 +1834,7 @@ mod tests {
     #[test]
     fn live_vcs_config_atomically_replaces_registry_and_keeps_invalid_section() {
         let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("workspace")];
         assert_eq!(app.vcs_registry.generation(), 1);
         assert!(app.vcs_registry.providers().is_empty());
 
@@ -1853,10 +1851,22 @@ mod tests {
             allow: vec!["inspect".into()],
             ..crate::config::VcsProviderConfig::default()
         });
+        app.state.workspaces[0].cached_external_vcs = Some(crate::workspace::ExternalVcsState {
+            provider_id: "old-provider".into(),
+            provider_display_name: "Old Provider".into(),
+            repository_root: "/old".into(),
+            repository_key: "old:key".into(),
+            capabilities: std::collections::BTreeSet::new(),
+            checkout_directory: None,
+            branch: Some("stale".into()),
+            ahead: None,
+            behind: None,
+        });
         let report = app.apply_live_config(&config, &[], &[], false);
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.vcs_registry.generation(), 2);
         assert_eq!(app.vcs_registry.providers().len(), 1);
+        assert!(app.state.workspaces[0].cached_external_vcs.is_none());
 
         let report = app.apply_live_config(&Config::default(), &[], &["vcs".into()], false);
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);

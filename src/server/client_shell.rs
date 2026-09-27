@@ -287,13 +287,20 @@ pub(super) fn vcs_projection(
                     branch: vcs.branch.clone(),
                     ahead: vcs.ahead,
                     behind: vcs.behind,
-                    capabilities: vcs.capabilities.clone(),
+                    capabilities: vcs
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.as_str().to_owned())
+                        .collect(),
                     can_create_checkout: vcs.checkout_directory.is_some()
-                        && vcs.capabilities.iter().any(|cap| cap == "checkout.create"),
+                        && vcs
+                            .capabilities
+                            .contains(&crate::vcs::Capability::CheckoutCreate),
                     checkout: workspace.checkout_space.as_ref().map(|checkout| {
                         protocol::endpoint::EndpointWorkspaceCheckout {
                             id: checkout.checkout_id.clone(),
                             name: checkout.checkout_name.clone(),
+                            path: Some(checkout.checkout_path.display().to_string()),
                             managed: checkout.managed,
                             is_source: checkout.source_workspace_id.is_none(),
                         }

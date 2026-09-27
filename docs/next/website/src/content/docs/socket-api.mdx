@@ -375,6 +375,13 @@ The server rechecks provider capabilities for every request. Removal requires
 provider-managed provenance and is always executed by the provider; Herdr never
 recursively deletes an external checkout directory.
 
+Checkout mutations reserve their canonical path across both Git worktree and
+external-provider operations. A provider timeout that cannot be conclusively
+reconciled returns `checkout_outcome_unknown` and keeps that path quarantined.
+If VCS configuration changes while a request is running, stale list/open results
+return `vcs_configuration_changed`; successful create/remove results are still
+finalized because the external side effect has already happened.
+
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
 
 ## Agent view queries

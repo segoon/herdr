@@ -12,7 +12,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y,
         inner.width,
-        if create.external_checkout {
+        if create.backend.is_external() {
             "new checkout"
         } else {
             "new worktree"
@@ -27,7 +27,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 2,
         inner.width,
-        if create.external_checkout {
+        if create.backend.is_external() {
             " name"
         } else {
             " branch"
@@ -47,7 +47,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.x,
         inner.y + 5,
         inner.width,
-        if create.external_checkout {
+        if create.backend.is_external() {
             " provider"
         } else {
             " checkout"
@@ -61,7 +61,7 @@ pub(super) fn render_worktree_create_overlay(
         inner.width,
         &format!(
             " {}",
-            if create.external_checkout {
+            if create.backend.is_external() {
                 &create.repo_name
             } else {
                 &create.checkout_path
@@ -138,7 +138,7 @@ pub(super) fn render_worktree_open_overlay(
         inner.x,
         inner.y,
         inner.width,
-        if open.external_checkout {
+        if open.backend.is_external() {
             "open checkout"
         } else {
             "open worktree"
@@ -160,7 +160,7 @@ pub(super) fn render_worktree_open_overlay(
         } else if !open.query.is_empty() {
             format!(" / {}", open.query)
         } else {
-            if open.external_checkout {
+            if open.backend.is_external() {
                 " / filter checkouts".to_owned()
             } else {
                 " / filter worktrees".to_owned()
@@ -272,7 +272,7 @@ pub(super) fn render_worktree_open_overlay(
             body.x,
             body.y,
             body.width,
-            if open.external_checkout {
+            if open.backend.is_external() {
                 " no matching checkouts"
             } else {
                 " no matching worktrees"
@@ -348,7 +348,7 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y,
         inner.width,
-        if remove.external_checkout {
+        if remove.backend.is_external() {
             " delete checkout?"
         } else {
             " delete worktree checkout?"
@@ -379,7 +379,7 @@ pub(super) fn render_worktree_remove_overlay(
         inner.x,
         inner.y + 3,
         inner.width,
-        if remove.external_checkout {
+        if remove.backend.is_external() {
             " The provider removes the checkout. The Herdr workspace will close."
         } else {
             " The branch is not deleted. The Herdr workspace will close."

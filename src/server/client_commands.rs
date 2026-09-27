@@ -47,6 +47,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.focus",
     "tab.move",
     "tab.rename",
+    "vcs.status_interest.set",
     "workspace.close",
     "workspace.create",
     "workspace.focus",
@@ -317,6 +318,10 @@ mod tests {
             actual.remove("checkout.remove").as_deref(),
             Some("1c06029ecea7f6d286c30b444e3a9bc70011740257a2d5dd9ad9a86b1715871b")
         );
+        assert_eq!(
+            actual.remove("vcs.status_interest.set").as_deref(),
+            Some("97063269a3d79f59d6eab277efc7a780f8627f9e260273293b945864ee69aca2")
+        );
 
         assert_eq!(
             actual, expected,
@@ -372,6 +377,9 @@ mod tests {
                 active: false,
             })
         ));
+        assert!(supports_client_shell_method(&Method::VcsStatusInterestSet(
+            crate::api::schema::VcsStatusInterestSetParams { interested: false }
+        )));
         assert!(supports_client_shell_method(&Method::ServerReloadConfig(
             crate::api::schema::EmptyParams::default(),
         )));

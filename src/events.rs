@@ -13,7 +13,29 @@ use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
 pub(crate) struct ExternalVcsRefreshResult {
     pub(crate) workspace_id: String,
     pub(crate) resolved_identity_cwd: std::path::PathBuf,
-    pub(crate) state: Option<crate::workspace::ExternalVcsState>,
+    pub(crate) observation: ExternalVcsObservation,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExternalVcsObservation {
+    Present(crate::workspace::ExternalVcsState),
+    Absent,
+    Unavailable { provider_id: String },
+    NotExamined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalVcsFailureStage {
+    Activate,
+    Inspect,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalVcsFailure {
+    pub(crate) provider_id: String,
+    pub(crate) stage: ExternalVcsFailureStage,
+    pub(crate) retryable: bool,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -24,7 +46,8 @@ pub(crate) struct ExternalCheckoutSource {
     pub(crate) repository_key: String,
     pub(crate) source_workspace_id: Option<String>,
     pub(crate) source_cwd: std::path::PathBuf,
-    pub(crate) capabilities: Vec<String>,
+    pub(crate) capabilities: std::collections::BTreeSet<crate::vcs::Capability>,
+    pub(crate) source_checkout: Option<crate::vcs::Checkout>,
 }
 
 #[derive(Debug)]
@@ -53,9 +76,24 @@ pub(crate) enum ExternalCheckoutOutcome {
 pub(crate) struct ExternalCheckoutResult {
     pub(crate) id: String,
     pub(crate) source: ExternalCheckoutSource,
+    pub(crate) registry_generation: u64,
+    pub(crate) mutation: Option<ExternalCheckoutMutation>,
     pub(crate) respond_to: std::sync::mpsc::Sender<String>,
     pub(crate) result: Result<ExternalCheckoutOutcome, (String, String)>,
     pub(crate) removal_recovery: Option<ExternalCheckoutRemovalRecovery>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExternalCheckoutMutation {
+    Create {
+        operation_id: u64,
+        checkout_key: std::path::PathBuf,
+    },
+    Remove {
+        operation_id: u64,
+        workspace_id: String,
+        checkout_key: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -250,7 +288,7 @@ pub enum AppEvent {
         task_id: u64,
         results: Vec<ExternalVcsRefreshResult>,
         activations: Vec<crate::vcs::ActivatedProvider>,
-        failures: Vec<String>,
+        failures: Vec<ExternalVcsFailure>,
     },
     ExternalCheckoutFinished(Box<ExternalCheckoutResult>),
     /// A configured tab bar status command finished.

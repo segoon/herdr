@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::{App, GIT_REMOTE_STATUS_REFRESH_INTERVAL, GIT_REPO_DISCOVERY_REFRESH_INTERVAL};
-use crate::events::{AppEvent, ExternalVcsRefreshResult};
+use crate::events::{
+    AppEvent, ExternalVcsFailure, ExternalVcsFailureStage, ExternalVcsObservation,
+    ExternalVcsRefreshResult,
+};
 use crate::vcs::{ActivatedProvider, Capability, ExactPath};
 use crate::workspace::ExternalVcsState;
 
@@ -22,7 +25,11 @@ impl App {
             .unwrap_or(now);
     }
 
-    pub(crate) fn start_external_vcs_refresh_if_due(&mut self, now: Instant) {
+    pub(crate) fn start_external_vcs_refresh_if_due(
+        &mut self,
+        now: Instant,
+        client_status_interest: bool,
+    ) {
         if self.vcs_registry.providers().is_empty()
             || self.external_vcs_refresh_in_flight.is_some()
             || now.saturating_duration_since(self.last_external_vcs_refresh)
@@ -30,7 +37,7 @@ impl App {
         {
             return;
         }
-        let demand = self.external_vcs_status_demand();
+        let demand = self.external_vcs_status_demand() || client_status_interest;
         let refresh_identity = self.external_vcs_identity_refresh_requested
             || now.saturating_duration_since(self.last_external_vcs_discovery_refresh)
                 >= GIT_REPO_DISCOVERY_REFRESH_INTERVAL;
@@ -39,6 +46,7 @@ impl App {
         }
 
         let mut targets = Vec::new();
+        let mut observations = Vec::new();
         for workspace in &self.state.workspaces {
             let cwd = workspace
                 .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes);
@@ -57,6 +65,12 @@ impl App {
                     });
                     continue;
                 }
+                observations.push(ExternalVcsRefreshResult {
+                    workspace_id: workspace.id.clone(),
+                    resolved_identity_cwd: cwd,
+                    observation: ExternalVcsObservation::Absent,
+                });
+                continue;
             }
             if !refresh_identity {
                 if let Some(state) = workspace.cached_external_vcs.as_ref() {
@@ -66,17 +80,44 @@ impl App {
                         root: state.repository_root.clone(),
                         provider_id: state.provider_id.clone(),
                     });
+                } else {
+                    observations.push(ExternalVcsRefreshResult {
+                        workspace_id: workspace.id.clone(),
+                        resolved_identity_cwd: cwd,
+                        observation: ExternalVcsObservation::NotExamined,
+                    });
                 }
                 continue;
             }
-            let Ok(Some(discovered)) = self.vcs_registry.discover(&cwd) else {
-                continue;
+            let discovered = match self.vcs_registry.discover(&cwd) {
+                Ok(Some(discovered)) => discovered,
+                Ok(None) => {
+                    observations.push(ExternalVcsRefreshResult {
+                        workspace_id: workspace.id.clone(),
+                        resolved_identity_cwd: cwd,
+                        observation: ExternalVcsObservation::Absent,
+                    });
+                    continue;
+                }
+                Err(_) => {
+                    observations.push(ExternalVcsRefreshResult {
+                        workspace_id: workspace.id.clone(),
+                        resolved_identity_cwd: cwd,
+                        observation: ExternalVcsObservation::NotExamined,
+                    });
+                    continue;
+                }
             };
             // Preserve Git at the same or a deeper repository root. An external
             // repository nested inside Git may still become the selected VCS.
             if crate::workspace::git_space_metadata(&cwd)
                 .is_some_and(|git| path_depth(&git.repo_root) >= path_depth(&discovered.root))
             {
+                observations.push(ExternalVcsRefreshResult {
+                    workspace_id: workspace.id.clone(),
+                    resolved_identity_cwd: cwd,
+                    observation: ExternalVcsObservation::Absent,
+                });
                 continue;
             }
             targets.push(Target {
@@ -96,7 +137,7 @@ impl App {
                 .get(&target.provider_id)
                 .is_none_or(|deadline| now >= *deadline)
         });
-        if had_discovered_targets && targets.is_empty() {
+        if had_discovered_targets && targets.is_empty() && observations.is_empty() {
             self.last_external_vcs_refresh = now;
             return;
         }
@@ -110,7 +151,10 @@ impl App {
         self.last_external_vcs_refresh = now;
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let (results, activations, failures) = refresh(registry, cached, targets, demand).await;
+            let (mut results, activations, failures) =
+                refresh(registry, cached, targets, demand).await;
+            results.extend(observations);
+            results.sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
             let _ = event_tx
                 .send(AppEvent::ExternalVcsRefreshed {
                     generation,
@@ -147,7 +191,7 @@ async fn refresh(
 ) -> (
     Vec<ExternalVcsRefreshResult>,
     Vec<ActivatedProvider>,
-    Vec<String>,
+    Vec<ExternalVcsFailure>,
 ) {
     let mut grouped: BTreeMap<String, Vec<Target>> = BTreeMap::new();
     for target in targets {
@@ -156,58 +200,134 @@ async fn refresh(
             .or_default()
             .push(target);
     }
+    let mut groups = tokio::task::JoinSet::new();
+    for (provider_id, targets) in grouped {
+        let cached_provider = cached.remove(&provider_id);
+        let configured_provider = registry.provider(&provider_id).cloned();
+        groups.spawn(async move {
+            refresh_provider_group(
+                provider_id,
+                targets,
+                cached_provider,
+                configured_provider,
+                inspect,
+            )
+            .await
+        });
+    }
     let mut output = Vec::new();
     let mut activated_updates = Vec::new();
     let mut failures = Vec::new();
-    for (provider_id, targets) in grouped {
-        let activated = if let Some(provider) = cached.remove(&provider_id) {
-            provider
-        } else {
-            let Some(provider) = registry.provider(&provider_id) else {
-                continue;
-            };
-            let Ok(provider) = provider.activate().await else {
-                failures.push(provider_id);
-                continue;
-            };
-            activated_updates.push(provider.clone());
-            provider
+    while let Some(group) = groups.join_next().await {
+        let Ok((mut results, activation, failure)) = group else {
+            tracing::error!("external VCS refresh task terminated unexpectedly");
+            continue;
         };
-        let mut status = HashMap::new();
-        if inspect && activated.supports(Capability::Inspect) {
-            let mut roots = targets
+        output.append(&mut results);
+        if let Some(activation) = activation {
+            activated_updates.push(activation);
+        }
+        if let Some(failure) = failure {
+            failures.push(failure);
+        }
+    }
+    output.sort_by(|left, right| left.workspace_id.cmp(&right.workspace_id));
+    activated_updates.sort_by(|left, right| left.id().cmp(right.id()));
+    failures.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+    (output, activated_updates, failures)
+}
+
+async fn refresh_provider_group(
+    provider_id: String,
+    targets: Vec<Target>,
+    cached: Option<ActivatedProvider>,
+    configured: Option<crate::vcs::ExternalProvider>,
+    inspect: bool,
+) -> (
+    Vec<ExternalVcsRefreshResult>,
+    Option<ActivatedProvider>,
+    Option<ExternalVcsFailure>,
+) {
+    let (activated, activation_update) = if let Some(provider) = cached {
+        (provider, None)
+    } else {
+        let Some(provider) = configured else {
+            return (
+                unavailable_results(targets, &provider_id),
+                None,
+                Some(ExternalVcsFailure {
+                    provider_id,
+                    stage: ExternalVcsFailureStage::Activate,
+                    retryable: false,
+                    message: "provider was removed from the active registry".into(),
+                }),
+            );
+        };
+        match provider.activate().await {
+            Ok(provider) => (provider.clone(), Some(provider)),
+            Err(error) => {
+                let failure = ExternalVcsFailure {
+                    provider_id: provider_id.clone(),
+                    stage: ExternalVcsFailureStage::Activate,
+                    retryable: error.retryable(),
+                    message: error.to_string(),
+                };
+                return (
+                    unavailable_results(targets, &provider_id),
+                    None,
+                    Some(failure),
+                );
+            }
+        }
+    };
+    let mut status = HashMap::new();
+    if inspect && activated.supports(Capability::Inspect) {
+        let mut roots = targets
+            .iter()
+            .map(|target| target.root.clone())
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        for chunk in roots.chunks(256) {
+            let request = chunk
                 .iter()
-                .map(|target| target.root.clone())
-                .collect::<Vec<_>>();
-            roots.sort();
-            roots.dedup();
-            for chunk in roots.chunks(256) {
-                let request = chunk
-                    .iter()
-                    .map(|root| ExactPath::from_path(root))
-                    .collect();
-                if let Ok(items) = activated.inspect(request).await {
-                    for item in items {
-                        if let Ok(root) = item.root.to_path_buf() {
-                            if chunk.contains(&root) && !status.contains_key(&root) {
-                                status.insert(root, (item.branch, item.ahead, item.behind));
-                            }
-                        }
+                .map(|root| ExactPath::from_path(root))
+                .collect();
+            let items = match activated.inspect(request).await {
+                Ok(items) => items,
+                Err(error) => {
+                    let failure = ExternalVcsFailure {
+                        provider_id: provider_id.clone(),
+                        stage: ExternalVcsFailureStage::Inspect,
+                        retryable: error.retryable(),
+                        message: error.to_string(),
+                    };
+                    return (
+                        unavailable_results(targets, &provider_id),
+                        activation_update,
+                        Some(failure),
+                    );
+                }
+            };
+            for item in items {
+                if let Ok(root) = item.root.to_path_buf() {
+                    if chunk.contains(&root) && !status.contains_key(&root) {
+                        status.insert(root, (item.branch, item.ahead, item.behind));
                     }
-                } else {
-                    failures.push(provider_id.clone());
-                    break;
                 }
             }
         }
-        let capabilities = activated.capability_names();
-        let checkout_directory = activated.checkout_directory().map(Path::to_path_buf);
-        for target in targets {
+    }
+    let capabilities = activated.capabilities();
+    let checkout_directory = activated.checkout_directory().map(Path::to_path_buf);
+    let results = targets
+        .into_iter()
+        .map(|target| {
             let (branch, ahead, behind) = status.remove(&target.root).unwrap_or((None, None, None));
-            output.push(ExternalVcsRefreshResult {
+            ExternalVcsRefreshResult {
                 workspace_id: target.workspace_id,
                 resolved_identity_cwd: target.cwd,
-                state: Some(ExternalVcsState {
+                observation: ExternalVcsObservation::Present(ExternalVcsState {
                     provider_id: provider_id.clone(),
                     provider_display_name: activated.display_name().to_owned(),
                     repository_key: crate::vcs::repository_key(&provider_id, &target.root),
@@ -218,10 +338,23 @@ async fn refresh(
                     ahead,
                     behind,
                 }),
-            });
-        }
-    }
-    (output, activated_updates, failures)
+            }
+        })
+        .collect();
+    (results, activation_update, None)
+}
+
+fn unavailable_results(targets: Vec<Target>, provider_id: &str) -> Vec<ExternalVcsRefreshResult> {
+    targets
+        .into_iter()
+        .map(|target| ExternalVcsRefreshResult {
+            workspace_id: target.workspace_id,
+            resolved_identity_cwd: target.cwd,
+            observation: ExternalVcsObservation::Unavailable {
+                provider_id: provider_id.to_owned(),
+            },
+        })
+        .collect()
 }
 
 fn path_depth(path: &Path) -> usize {

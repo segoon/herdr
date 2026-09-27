@@ -29,7 +29,7 @@ impl ClientShellState {
             .unwrap_or_else(|| "VCS".into());
         self.overlay = Some(ClientShellOverlay::WorktreeCreate(
             ClientWorktreeCreateOverlay {
-                external_checkout: true,
+                backend: ClientCheckoutBackend::ExternalVcs,
                 source_workspace_id: workspace_id,
                 repo_name: provider_name,
                 branch: TextEditor::new("checkout", true),
@@ -61,11 +61,24 @@ impl ClientShellState {
         workspace_id: String,
         outcome: &mut ClientShellInput,
     ) {
+        let checkout_path = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| Self::endpoint_workspace_vcs(endpoint, &workspace_id))
+            .and_then(|vcs| vcs.checkout.as_ref())
+            .map(|checkout| {
+                checkout
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| checkout.name.clone())
+            })
+            .unwrap_or_else(|| "checkout path unavailable".into());
         self.overlay = Some(ClientShellOverlay::WorktreeRemove(
             ClientWorktreeRemoveOverlay {
-                external_checkout: true,
+                backend: ClientCheckoutBackend::ExternalVcs,
                 workspace_id,
-                path: "external checkout".into(),
+                path: checkout_path,
                 error: None,
                 removing: false,
                 force_confirmation: false,
@@ -327,7 +340,7 @@ impl ClientShellState {
         let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() else {
             return;
         };
-        if create.external_checkout {
+        if create.backend.is_external() {
             create.error = None;
             return;
         }
@@ -347,7 +360,7 @@ impl ClientShellState {
         let branch = create.branch.trim().to_owned();
         if branch.is_empty() {
             create.error = Some(
-                if create.external_checkout {
+                if create.backend.is_external() {
                     "name is required"
                 } else {
                     "branch is required"
@@ -358,7 +371,7 @@ impl ClientShellState {
             return;
         }
         create.branch.trim_and_accept();
-        if create.external_checkout {
+        if create.backend.is_external() {
             create.creating = true;
             create.error = None;
             let workspace_id = create.source_workspace_id.clone();
@@ -373,7 +386,7 @@ impl ClientShellState {
                         focus: false,
                     },
                 ),
-                PendingEndpointKind::WorktreeCreate,
+                PendingEndpointKind::CheckoutCreate,
                 outcome,
             ) {
                 if let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() {
@@ -443,34 +456,36 @@ impl ClientShellState {
             return;
         };
         let workspace_id = open.source_workspace_id.clone();
-        let path = entry.path.clone();
-        let checkout_id = entry.checkout_id.clone();
-        let external_checkout = open.external_checkout;
+        let target = entry.target.clone();
+        let backend = open.backend;
         open.selected = index;
         open.opening = true;
         open.error = None;
-        let method = if let Some(checkout_id) = checkout_id {
-            crate::api::schema::Method::CheckoutOpen(crate::api::schema::CheckoutOpenParams {
-                workspace_id: Some(workspace_id),
-                cwd: None,
-                checkout_id,
-                label: None,
-                focus: true,
-            })
-        } else {
-            crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
-                workspace_id: Some(workspace_id),
-                cwd: None,
-                path: Some(path),
-                branch: None,
-                label: None,
-                focus: true,
-                trust_repository: false,
-            })
+        let method = match target {
+            ClientCheckoutOpenTarget::ExternalId(checkout_id) => {
+                crate::api::schema::Method::CheckoutOpen(crate::api::schema::CheckoutOpenParams {
+                    workspace_id: Some(workspace_id),
+                    cwd: None,
+                    checkout_id,
+                    label: None,
+                    focus: true,
+                })
+            }
+            ClientCheckoutOpenTarget::GitPath(path) => {
+                crate::api::schema::Method::WorktreeOpen(crate::api::schema::WorktreeOpenParams {
+                    workspace_id: Some(workspace_id),
+                    cwd: None,
+                    path: Some(path),
+                    branch: None,
+                    label: None,
+                    focus: true,
+                    trust_repository: false,
+                })
+            }
         };
         if !self.push_endpoint_method_with_kind(
             method,
-            if external_checkout {
+            if backend.is_external() {
                 PendingEndpointKind::CheckoutOpen
             } else {
                 PendingEndpointKind::WorktreeOpen
@@ -493,10 +508,10 @@ impl ClientShellState {
         }
         let workspace_id = remove.workspace_id.clone();
         let forced = remove.force_confirmation;
-        let external_checkout = remove.external_checkout;
+        let backend = remove.backend;
         remove.removing = true;
         remove.error = None;
-        let method = if external_checkout {
+        let method = if backend.is_external() {
             crate::api::schema::Method::CheckoutRemove(crate::api::schema::CheckoutRemoveParams {
                 workspace_id,
                 force: forced,
@@ -510,7 +525,7 @@ impl ClientShellState {
         };
         if !self.push_endpoint_method_with_kind(
             method,
-            if external_checkout {
+            if backend.is_external() {
                 PendingEndpointKind::CheckoutRemove { forced }
             } else {
                 PendingEndpointKind::WorktreeRemove { forced }
@@ -549,7 +564,7 @@ impl ClientShellState {
                     checkout_path_preview(&worktree_directory, &source.repo_name, &branch);
                 self.overlay = Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
-                        external_checkout: false,
+                        backend: ClientCheckoutBackend::GitWorktree,
                         source_workspace_id: workspace_id,
                         repo_name: source.repo_name,
                         branch: TextEditor::new(&branch, true),
@@ -570,7 +585,7 @@ impl ClientShellState {
                     .map(|entry| {
                         let label = entry.branch.clone().unwrap_or_else(|| entry.label.clone());
                         ClientWorktreeOpenEntry {
-                            checkout_id: None,
+                            target: ClientCheckoutOpenTarget::GitPath(entry.path.clone()),
                             path: entry.path,
                             branch: entry.branch,
                             is_linked_worktree: entry.is_linked_worktree,
@@ -585,7 +600,7 @@ impl ClientShellState {
                 } else {
                     self.overlay = Some(ClientShellOverlay::WorktreeOpen(
                         ClientWorktreeOpenOverlay {
-                            external_checkout: false,
+                            backend: ClientCheckoutBackend::GitWorktree,
                             source_workspace_id: workspace_id,
                             entries,
                             selected: 0,
@@ -609,7 +624,7 @@ impl ClientShellState {
                 if let Some(path) = path {
                     self.overlay = Some(ClientShellOverlay::WorktreeRemove(
                         ClientWorktreeRemoveOverlay {
-                            external_checkout: false,
+                            backend: ClientCheckoutBackend::GitWorktree,
                             workspace_id,
                             path,
                             error: None,
@@ -631,7 +646,7 @@ impl ClientShellState {
                 let entries = checkouts
                     .into_iter()
                     .map(|entry| ClientWorktreeOpenEntry {
-                        checkout_id: Some(entry.id),
+                        target: ClientCheckoutOpenTarget::ExternalId(entry.id),
                         path: entry.path,
                         branch: None,
                         is_linked_worktree: true,
@@ -645,7 +660,7 @@ impl ClientShellState {
                 } else {
                     self.overlay = Some(ClientShellOverlay::WorktreeOpen(
                         ClientWorktreeOpenOverlay {
-                            external_checkout: true,
+                            backend: ClientCheckoutBackend::ExternalVcs,
                             source_workspace_id: workspace_id,
                             entries,
                             selected: 0,
@@ -672,7 +687,7 @@ impl ClientShellState {
                 true
             }
             (
-                PendingEndpointKind::WorktreeCreate,
+                PendingEndpointKind::CheckoutCreate,
                 Ok(ResponseResult::CheckoutCreated { tab, .. }),
             ) => {
                 self.overlay = None;
@@ -701,6 +716,13 @@ impl ClientShellState {
                 true
             }
             (PendingEndpointKind::WorktreeCreate, Err(error)) => {
+                if let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() {
+                    create.creating = false;
+                    create.error = Some(error.message);
+                }
+                true
+            }
+            (PendingEndpointKind::CheckoutCreate, Err(error)) => {
                 if let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() {
                     create.creating = false;
                     create.error = Some(error.message);

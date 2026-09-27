@@ -4910,14 +4910,11 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
     server.app.state.active = Some(1);
     server.app.state.selected = 1;
     let checkout_key = crate::worktree::canonical_or_original(&checkout);
-    server
-        .app
-        .pending_api_worktree_removes
-        .insert(workspace_id.clone(), 7);
-    server
-        .app
-        .pending_api_worktree_remove_paths
-        .insert(checkout_key.clone(), 7);
+    server.app.checkout_requests.insert_remove_for_test(
+        workspace_id.clone(),
+        checkout_key.clone(),
+        7,
+    );
     server
         .app
         .pending_worktree_remove_runtime_exits

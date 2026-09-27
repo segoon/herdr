@@ -424,7 +424,7 @@ pub(super) struct ClientSettingsOverlay {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeCreateOverlay {
-    pub(super) external_checkout: bool,
+    pub(super) backend: ClientCheckoutBackend,
     pub(super) source_workspace_id: String,
     pub(super) repo_name: String,
     pub(super) branch: TextEditor,
@@ -435,13 +435,19 @@ pub(super) struct ClientWorktreeCreateOverlay {
 
 #[derive(Debug, Clone)]
 pub(super) struct ClientWorktreeOpenEntry {
-    pub(super) checkout_id: Option<String>,
+    pub(super) target: ClientCheckoutOpenTarget,
     pub(super) path: String,
     pub(super) branch: Option<String>,
     pub(super) is_linked_worktree: bool,
     pub(super) is_detached: bool,
     pub(super) open_workspace_id: Option<String>,
     pub(super) label: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum ClientCheckoutOpenTarget {
+    GitPath(String),
+    ExternalId(String),
 }
 
 impl ClientWorktreeOpenEntry {
@@ -474,7 +480,7 @@ impl ClientWorktreeOpenEntry {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeOpenOverlay {
-    pub(super) external_checkout: bool,
+    pub(super) backend: ClientCheckoutBackend,
     pub(super) source_workspace_id: String,
     pub(super) entries: Vec<ClientWorktreeOpenEntry>,
     pub(super) selected: usize,
@@ -504,12 +510,24 @@ impl ClientWorktreeOpenOverlay {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeRemoveOverlay {
-    pub(super) external_checkout: bool,
+    pub(super) backend: ClientCheckoutBackend,
     pub(super) workspace_id: String,
     pub(super) path: String,
     pub(super) error: Option<String>,
     pub(super) removing: bool,
     pub(super) force_confirmation: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClientCheckoutBackend {
+    GitWorktree,
+    ExternalVcs,
+}
+
+impl ClientCheckoutBackend {
+    pub(super) fn is_external(self) -> bool {
+        matches!(self, Self::ExternalVcs)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -648,6 +666,7 @@ pub(super) enum PendingEndpointKind {
         workspace_id: String,
     },
     WorktreeCreate,
+    CheckoutCreate,
     WorktreeOpen,
     WorktreeRemove {
         forced: bool,
@@ -991,6 +1010,16 @@ pub(super) struct WorkspaceEntry {
 }
 
 impl ClientShellState {
+    pub(crate) fn vcs_status_interest(&self) -> bool {
+        self.config.spaces.rows.iter().flatten().any(|token| {
+            matches!(
+                token.parts().0,
+                crate::config::SpaceSidebarToken::Branch
+                    | crate::config::SpaceSidebarToken::GitStatus
+            )
+        })
+    }
+
     pub(crate) fn new(mut config: ClientShellConfig) -> Self {
         let preferences = config.preferences.clone();
         let local_config_diagnostic = config.startup_config_diagnostic.take();

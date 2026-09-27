@@ -275,7 +275,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             filter: None,
         }),
         ClientShellOverlay::WorktreeCreate(ClientWorktreeCreateOverlay {
-            external_checkout: false,
+            backend: ClientCheckoutBackend::GitWorktree,
             source_workspace_id: "ws_1".into(),
             repo_name: "repo".into(),
             branch: "branch".into(),
@@ -284,7 +284,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             creating: false,
         }),
         ClientShellOverlay::WorktreeOpen(ClientWorktreeOpenOverlay {
-            external_checkout: false,
+            backend: ClientCheckoutBackend::GitWorktree,
             source_workspace_id: "ws_1".into(),
             entries: Vec::new(),
             selected: 0,
@@ -294,7 +294,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             opening: false,
         }),
         ClientShellOverlay::WorktreeRemove(ClientWorktreeRemoveOverlay {
-            external_checkout: false,
+            backend: ClientCheckoutBackend::GitWorktree,
             workspace_id: "ws_1".into(),
             path: "path".into(),
             error: None,

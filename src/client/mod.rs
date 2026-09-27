@@ -1814,6 +1814,9 @@ async fn run_client_loop(
                         if request_id.starts_with("client-shell-surface:") {
                             continue;
                         }
+                        if request_id.starts_with("vcs-status-interest:") {
+                            continue;
+                        }
                         let completed = endpoint_commands
                             .receive_chunk(
                                 &endpoint_id,

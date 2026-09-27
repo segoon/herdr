@@ -53,7 +53,7 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "inspect" => Some(Self::Inspect),
             "checkout.list" => Some(Self::CheckoutList),
@@ -533,6 +533,10 @@ impl ActivatedProvider {
             .iter()
             .map(|capability| capability.as_str().to_owned())
             .collect()
+    }
+
+    pub(crate) fn capabilities(&self) -> BTreeSet<Capability> {
+        self.effective_capabilities.clone()
     }
 
     pub(crate) fn supports(&self, capability: Capability) -> bool {
@@ -1131,6 +1135,16 @@ impl std::fmt::Display for ProviderFailure {
     }
 }
 
+impl ProviderFailure {
+    pub(crate) fn retryable(&self) -> bool {
+        match self {
+            Self::Provider(error) => error.retryable,
+            Self::Protocol(_) => false,
+            Self::Launch(_) | Self::Io(_) | Self::Timeout(_) | Self::Exit { .. } => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1267,6 +1281,72 @@ mod tests {
         assert_eq!(value["root"]["encoding"], "utf8");
         assert_eq!(value["root"]["value"], "/repo");
         assert_eq!(value["destination"]["value"], "/checkouts/topic");
+    }
+
+    #[test]
+    fn provider_protocol_v1_matches_frozen_examples() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/vcs-provider-protocol-v1.json"
+        )))
+        .expect("VCS provider protocol fixture");
+        let requests = fixture["requests"].as_object().expect("request examples");
+        let examples = [
+            (1, RequestOperation::Describe),
+            (
+                2,
+                RequestOperation::Inspect {
+                    roots: vec![ExactPath::Utf8("/repo".into())],
+                },
+            ),
+            (
+                3,
+                RequestOperation::CheckoutList {
+                    root: ExactPath::Utf8("/repo".into()),
+                },
+            ),
+            (
+                4,
+                RequestOperation::CheckoutCreate {
+                    root: ExactPath::Utf8("/repo".into()),
+                    name: "topic".into(),
+                    destination: ExactPath::Utf8("/checkouts/topic".into()),
+                },
+            ),
+            (
+                5,
+                RequestOperation::CheckoutRemove {
+                    root: ExactPath::Utf8("/repo".into()),
+                    checkout: ExactPath::Utf8("/checkouts/topic".into()),
+                    force: false,
+                },
+            ),
+        ];
+        for (request_id, operation) in examples {
+            let name = match &operation {
+                RequestOperation::Describe => "describe",
+                RequestOperation::Inspect { .. } => "inspect",
+                RequestOperation::CheckoutList { .. } => "checkout.list",
+                RequestOperation::CheckoutCreate { .. } => "checkout.create",
+                RequestOperation::CheckoutRemove { .. } => "checkout.remove",
+            };
+            assert_eq!(
+                serde_json::to_value(WireRequest {
+                    protocol_version: 1,
+                    request_id,
+                    operation,
+                })
+                .unwrap(),
+                requests[name]
+            );
+        }
+
+        for (name, value) in fixture["responses"].as_object().expect("response examples") {
+            let response: WireResponse = serde_json::from_value(value.clone())
+                .unwrap_or_else(|error| panic!("invalid {name} response example: {error}"));
+            assert_eq!(response.protocol_version, 1);
+            assert!(response.request_id > 0);
+        }
     }
 
     #[test]

@@ -40,12 +40,6 @@ impl App {
         let _ = respond_to.send(response);
     }
 
-    fn next_api_worktree_operation_id(&mut self) -> u64 {
-        let id = self.next_api_worktree_operation_id;
-        self.next_api_worktree_operation_id = self.next_api_worktree_operation_id.saturating_add(1);
-        id
-    }
-
     fn api_create_source_workspace_idx(&self, api: &ApiWorktreeAddRequest) -> Option<usize> {
         let Some(source_workspace_id) = api.source_workspace_id.as_ref() else {
             return self.find_parent_workspace_by_key(&api.repo_key);
@@ -144,13 +138,7 @@ impl App {
             ),
         };
         let checkout_key = crate::worktree::canonical_or_original(&checkout_path);
-        if self
-            .pending_api_worktree_creates
-            .contains_key(&checkout_key)
-            || self
-                .pending_api_worktree_remove_paths
-                .contains_key(&checkout_key)
-        {
+        if self.checkout_requests.has_path_conflict(&checkout_key) {
             Self::send_api_response(
                 respond_to,
                 encode_error(
@@ -161,9 +149,10 @@ impl App {
             );
             return;
         }
-        let operation_id = self.next_api_worktree_operation_id();
-        self.pending_api_worktree_creates
-            .insert(checkout_key.clone(), operation_id);
+        let operation_id = self
+            .checkout_requests
+            .reserve_create(checkout_key.clone())
+            .expect("checkout conflict checked before reservation");
 
         let parent_dir = checkout_path.parent().map(Path::to_path_buf);
         let source_workspace_id = source
@@ -287,14 +276,8 @@ impl App {
         let workspace_internal_id = self.state.workspaces[ws_idx].id.clone();
         let checkout_key = crate::worktree::canonical_or_original(&space.checkout_path);
         if self
-            .pending_api_worktree_removes
-            .contains_key(&workspace_internal_id)
-            || self
-                .pending_api_worktree_remove_paths
-                .contains_key(&checkout_key)
-            || self
-                .pending_api_worktree_creates
-                .contains_key(&checkout_key)
+            .checkout_requests
+            .has_remove_conflict(&workspace_internal_id, &checkout_key)
             || self
                 .state
                 .pane_ids_for_workspace(ws_idx)
@@ -322,11 +305,10 @@ impl App {
                 Vec::new()
             };
 
-        let operation_id = self.next_api_worktree_operation_id();
-        self.pending_api_worktree_removes
-            .insert(workspace_internal_id.clone(), operation_id);
-        self.pending_api_worktree_remove_paths
-            .insert(checkout_key.clone(), operation_id);
+        let operation_id = self
+            .checkout_requests
+            .reserve_remove(workspace_internal_id.clone(), checkout_key.clone())
+            .expect("checkout conflict checked before reservation");
         let workspace_snapshot = self.workspace_info(ws_idx);
         let worktree = self.worktree_info_for_membership(&space, None);
         let command = crate::worktree::build_worktree_remove_command(
@@ -378,9 +360,8 @@ impl App {
         };
         let checkout_key = api.checkout_key.clone();
         let operation_matches = self
-            .pending_api_worktree_creates
-            .get(&checkout_key)
-            .is_some_and(|operation_id| *operation_id == api.operation_id);
+            .checkout_requests
+            .matches_create(api.operation_id, &checkout_key);
         if !operation_matches {
             Self::send_api_response(
                 api.respond_to,
@@ -392,7 +373,8 @@ impl App {
             );
             return;
         }
-        self.pending_api_worktree_creates.remove(&checkout_key);
+        self.checkout_requests
+            .finish_create(api.operation_id, &checkout_key);
 
         if let Err(err) = result.result {
             Self::send_api_response(
@@ -490,14 +472,11 @@ impl App {
         let Some(api) = result.api_request.take() else {
             return Vec::new();
         };
-        let operation_matches = self
-            .pending_api_worktree_removes
-            .get(&result.workspace_id)
-            .is_some_and(|operation_id| *operation_id == api.operation_id)
-            && self
-                .pending_api_worktree_remove_paths
-                .get(&api.checkout_key)
-                .is_some_and(|operation_id| *operation_id == api.operation_id);
+        let operation_matches = self.checkout_requests.matches_remove(
+            api.operation_id,
+            &result.workspace_id,
+            &api.checkout_key,
+        );
         if !operation_matches {
             Self::send_api_response(
                 api.respond_to,
@@ -509,10 +488,11 @@ impl App {
             );
             return Vec::new();
         }
-        self.pending_api_worktree_removes
-            .remove(&result.workspace_id);
-        self.pending_api_worktree_remove_paths
-            .remove(&api.checkout_key);
+        self.checkout_requests.finish_remove(
+            api.operation_id,
+            &result.workspace_id,
+            &api.checkout_key,
+        );
 
         if let Err(message) = result.result {
             let pane_updates = self.restore_shutdown_worktree_panes(

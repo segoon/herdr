@@ -33,6 +33,7 @@ pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
 pub const VCS_PROJECTION_CAPABILITY: &str = "vcs_projection";
 pub const VCS_PROJECTION_KIND: &str = "endpoint.vcs.v1";
+pub const VCS_STATUS_INTEREST_CAPABILITY: &str = "vcs_status_interest";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointWorkspaceVcs {
@@ -57,6 +58,8 @@ pub struct EndpointWorkspaceVcs {
 pub struct EndpointWorkspaceCheckout {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub managed: bool,
     pub is_source: bool,
 }
@@ -217,6 +220,7 @@ impl EndpointServerWelcome {
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
                 VCS_PROJECTION_CAPABILITY.into(),
+                VCS_STATUS_INTEREST_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -296,6 +300,32 @@ mod tests {
             serde_json::from_str::<EndpointVcsProjection>(&data).unwrap(),
             projection
         );
+    }
+
+    #[test]
+    fn vcs_checkout_path_is_additive_and_optional() {
+        let legacy: EndpointWorkspaceCheckout = serde_json::from_value(serde_json::json!({
+            "id": "topic",
+            "name": "topic",
+            "managed": true,
+            "is_source": false,
+            "future_field": 7
+        }))
+        .unwrap();
+        assert_eq!(legacy.path, None);
+
+        let current = EndpointWorkspaceCheckout {
+            id: "topic".into(),
+            name: "topic".into(),
+            path: Some("/repo/topic".into()),
+            managed: true,
+            is_source: false,
+        };
+        let encoded = serde_json::to_value(current).unwrap();
+        assert_eq!(encoded["path"], "/repo/topic");
+        for required in ["id", "name", "managed", "is_source"] {
+            assert!(encoded.get(required).is_some(), "missing {required}");
+        }
     }
 
     fn snapshot() -> ClientShellSnapshot {
@@ -459,6 +489,7 @@ mod tests {
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
                 VCS_PROJECTION_CAPABILITY.to_string(),
+                VCS_STATUS_INTEREST_CAPABILITY.to_string(),
             ]
         );
     }

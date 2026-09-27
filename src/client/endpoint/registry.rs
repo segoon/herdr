@@ -57,12 +57,18 @@ impl EndpointNegotiation {
     pub(crate) fn supports_health_check(&self) -> bool {
         self.supports_capability(crate::protocol::endpoint::HEALTH_CHECK_CAPABILITY)
     }
+
+    pub(crate) fn supports_vcs_status_interest(&self) -> bool {
+        self.supports_capability(crate::protocol::endpoint::VCS_STATUS_INTEREST_CAPABILITY)
+            && self.supports_method("vcs.status_interest.set")
+    }
 }
 
 pub(crate) struct EndpointConnection {
     transport: Box<dyn EndpointTransport>,
     pub(crate) generation: u64,
     pub(crate) surface_active: bool,
+    pub(crate) vcs_status_interest: Option<bool>,
     pub(crate) negotiation: EndpointNegotiation,
     health: Option<EndpointHealth>,
 }
@@ -160,6 +166,7 @@ impl EndpointRegistry {
                 transport: Box::new(transport),
                 generation,
                 surface_active,
+                vcs_status_interest: None,
                 negotiation,
                 health,
             },
@@ -261,6 +268,19 @@ impl EndpointRegistry {
         };
         let changed = connection.surface_active != active;
         connection.surface_active = active;
+        changed
+    }
+
+    pub(crate) fn set_vcs_status_interest(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        interested: bool,
+    ) -> bool {
+        let Some(connection) = self.connections.get_mut(endpoint_id) else {
+            return false;
+        };
+        let changed = connection.vcs_status_interest != Some(interested);
+        connection.vcs_status_interest = Some(interested);
         changed
     }
 
@@ -576,6 +596,24 @@ mod tests {
             vec![crate::protocol::endpoint::SURFACE_INTEREST_CAPABILITY.into()]
         )
         .supports_surface_interest());
+    }
+
+    #[test]
+    fn negotiated_vcs_status_interest_requires_capability_and_method() {
+        assert!(EndpointNegotiation::new(
+            vec!["vcs.status_interest.set".into()],
+            vec![crate::protocol::endpoint::VCS_STATUS_INTEREST_CAPABILITY.into()],
+        )
+        .supports_vcs_status_interest());
+        assert!(
+            !EndpointNegotiation::new(vec!["vcs.status_interest.set".into()], Vec::new(),)
+                .supports_vcs_status_interest()
+        );
+        assert!(!EndpointNegotiation::new(
+            Vec::new(),
+            vec![crate::protocol::endpoint::VCS_STATUS_INTEREST_CAPABILITY.into()],
+        )
+        .supports_vcs_status_interest());
     }
 
     #[test]

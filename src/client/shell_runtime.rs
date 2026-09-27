@@ -616,8 +616,37 @@ pub(super) fn install_client_shell_snapshot(
         return Ok(());
     };
     let generation = connection.generation;
+    let surface_active = connection.surface_active;
+    let supports_vcs_status_interest = connection.negotiation.supports_vcs_status_interest();
+    let sent_vcs_status_interest = connection.vcs_status_interest;
+    let boot_id = snapshot.boot_id.clone();
+    let vcs_status_interest = state
+        .shell
+        .as_ref()
+        .is_none_or(|shell| shell.vcs_status_interest());
+    if supports_vcs_status_interest && sent_vcs_status_interest != Some(vcs_status_interest) {
+        let request = crate::api::schema::Request {
+            id: format!("vcs-status-interest:{generation}"),
+            method: crate::api::schema::Method::VcsStatusInterestSet(
+                crate::api::schema::VcsStatusInterestSetParams {
+                    interested: vcs_status_interest,
+                },
+            ),
+        };
+        let message = crate::protocol::ClientMessage::ClientShellEndpointRequest {
+            boot_id,
+            request: serde_json::to_string(&request).map_err(|error| {
+                ClientError::Protocol(crate::protocol::FramingError::Bincode(format!(
+                    "endpoint request JSON encoding failed: {error}"
+                )))
+            })?,
+        };
+        if endpoints.send_to(endpoint_id, &message) == endpoint::EndpointSendOutcome::Sent {
+            endpoints.set_vcs_status_interest(endpoint_id, vcs_status_interest);
+        }
+    }
     let project_snapshot =
-        !projection_pending && endpoints.active_id() == endpoint_id && connection.surface_active;
+        !projection_pending && endpoints.active_id() == endpoint_id && surface_active;
     let (composed, resize, graphics_cleanup) = if let Some(shell) = &mut state.shell {
         let waits_for_selected_surface = projection_pending
             || (endpoints.active_id() == endpoint_id

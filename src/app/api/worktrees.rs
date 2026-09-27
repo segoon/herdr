@@ -937,7 +937,7 @@ mod tests {
             String::from_utf8(branch_name.stdout).unwrap().trim(),
             branch
         );
-        assert!(app.pending_api_worktree_creates.is_empty());
+        assert!(app.checkout_requests.is_empty());
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -986,7 +986,7 @@ mod tests {
             .expect("failed create should respond");
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "worktree_create_failed");
-        assert!(app.pending_api_worktree_creates.is_empty());
+        assert!(app.checkout_requests.is_empty());
 
         let (second_tx, second_rx) = response_channel();
         assert!(app.handle_deferred_worktree_api_request(request(), second_tx, false));
@@ -1016,8 +1016,8 @@ mod tests {
         source.identity_cwd = repo.clone();
         let source_id = source.id.clone();
         app.state.workspaces = vec![source];
-        app.pending_api_worktree_creates
-            .insert(checkout_key.clone(), 9);
+        app.checkout_requests
+            .insert_create_for_test(checkout_key.clone(), 9);
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "other-key".into(),
             label: "other".into(),
@@ -2324,8 +2324,11 @@ mod tests {
         let repo = create_committed_repo("api-worktree-create-remove-in-flight-repo");
         let checkout = unique_temp_path("api-worktree-create-remove-in-flight-checkout");
         let mut app = test_app();
-        app.pending_api_worktree_remove_paths
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests.insert_remove_for_test(
+            "removing-workspace".into(),
+            crate::worktree::canonical_or_original(&checkout),
+            7,
+        );
         let (respond_to, response_rx) = response_channel();
 
         assert!(app.handle_deferred_worktree_api_request(
@@ -2385,8 +2388,8 @@ mod tests {
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
         app.state.ensure_test_terminals();
-        app.pending_api_worktree_creates
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests
+            .insert_create_for_test(crate::worktree::canonical_or_original(&checkout), 7);
         let (respond_to, response_rx) = response_channel();
 
         assert!(app.handle_deferred_worktree_api_request(
@@ -2463,10 +2466,8 @@ mod tests {
         assert_eq!(shutdown_panes, vec![pane_id]);
 
         let checkout_key = crate::worktree::canonical_or_original(&checkout);
-        app.pending_api_worktree_removes
-            .insert(workspace_id.clone(), 7);
-        app.pending_api_worktree_remove_paths
-            .insert(checkout_key.clone(), 7);
+        app.checkout_requests
+            .insert_remove_for_test(workspace_id.clone(), checkout_key.clone(), 7);
         let workspace_snapshot = app.workspace_info(0);
         let worktree_snapshot = app
             .worktree_info_for_membership(app.state.workspaces[0].worktree_space().unwrap(), None);
@@ -2553,9 +2554,11 @@ mod tests {
             .insert(child_pane_id, 7);
         let workspace_snapshot = app.workspace_info(1);
         let worktree_snapshot = app.worktree_info_for_membership(&membership, None);
-        app.pending_api_worktree_removes.insert(child_id.clone(), 7);
-        app.pending_api_worktree_remove_paths
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests.insert_remove_for_test(
+            child_id.clone(),
+            crate::worktree::canonical_or_original(&checkout),
+            7,
+        );
         let (respond_to, response_rx) = response_channel();
 
         let _ = app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
@@ -2614,9 +2617,11 @@ mod tests {
         let workspace_snapshot = app.workspace_info(0);
         let worktree_snapshot = app
             .worktree_info_for_membership(app.state.workspaces[0].worktree_space().unwrap(), None);
-        app.pending_api_worktree_removes.insert(child_id.clone(), 7);
-        app.pending_api_worktree_remove_paths
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests.insert_remove_for_test(
+            child_id.clone(),
+            crate::worktree::canonical_or_original(&checkout),
+            7,
+        );
         app.pending_worktree_remove_runtime_exits
             .insert(child_pane_id, 1);
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {

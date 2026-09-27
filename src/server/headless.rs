@@ -3255,7 +3255,12 @@ impl HeadlessServer {
 
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
-            self.app.start_external_vcs_refresh_if_due(now);
+            let vcs_status_interest = self.clients.values().any(|client| {
+                matches!(client.mode, ClientConnectionMode::ClientShell)
+                    && client.shell_vcs_status_interest.unwrap_or(true)
+            });
+            self.app
+                .start_external_vcs_refresh_if_due(now, vcs_status_interest);
         }
 
         if self

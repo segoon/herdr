@@ -178,7 +178,7 @@ pub(crate) struct ExternalVcsState {
     pub(crate) provider_display_name: String,
     pub(crate) repository_root: PathBuf,
     pub(crate) repository_key: String,
-    pub(crate) capabilities: Vec<String>,
+    pub(crate) capabilities: std::collections::BTreeSet<crate::vcs::Capability>,
     pub(crate) checkout_directory: Option<PathBuf>,
     pub(crate) branch: Option<String>,
     pub(crate) ahead: Option<u64>,

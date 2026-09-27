@@ -117,6 +117,10 @@ Only managed checkouts are eligible for provider-backed removal.
 The request contains `root`, a user-entered `name`, and an absolute `destination`.
 The response contains the created checkout in the same shape as `checkout.list`.
 The provider decides how `name` maps to its native branch or checkout model.
+The returned path must identify the requested destination. Herdr canonicalizes
+paths for conflict detection; a successful response that points at a different
+checkout is treated as an unknown outcome and quarantined for manual
+reconciliation.
 
 ### `checkout.remove`
 
@@ -128,3 +132,23 @@ falls back to recursively deleting an external checkout directory.
 
 Opening an existing checkout is a Herdr workspace operation and therefore has no
 provider protocol request.
+
+## Mutation and timeout semantics
+
+Herdr reserves a canonical checkout path while `checkout.create` or
+`checkout.remove` is running. The same reservation registry is used by built-in
+Git worktree operations, so overlapping Git and external-provider mutations are
+rejected with `checkout_operation_in_progress`.
+
+After an operation timeout, Herdr calls `checkout.list` to reconcile the result.
+Creation is successful only when the requested destination is listed; removal is
+successful only when the checkout is absent. Any other result is reported as
+`checkout_outcome_unknown`, and the reservation remains quarantined for the rest
+of the server process because retrying a mutation could duplicate or destroy
+provider state.
+
+Configuration reloads invalidate cached external VCS projections immediately.
+Read-only list/open results started under the old configuration are rejected with
+`vcs_configuration_changed`. A definitively successful create/remove result is
+grandfathered and finalized even if the provider was changed or removed while it
+was running; definite failures release the reservation normally.

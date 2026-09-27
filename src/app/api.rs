@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+pub(super) mod checkout_requests;
 mod checkouts;
 mod env;
 mod integrations;
@@ -106,7 +107,7 @@ impl App {
         task_id: u64,
         results: Vec<crate::events::ExternalVcsRefreshResult>,
         activations: Vec<crate::vcs::ActivatedProvider>,
-        failures: Vec<String>,
+        failures: Vec<crate::events::ExternalVcsFailure>,
     ) -> bool {
         if self.external_vcs_refresh_in_flight != Some(task_id) {
             return false;
@@ -121,8 +122,18 @@ impl App {
                 .insert(provider.id().to_owned(), provider);
         }
         let failed_providers = failures
-            .into_iter()
+            .iter()
+            .map(|failure| failure.provider_id.clone())
             .collect::<std::collections::HashSet<_>>();
+        for failure in &failures {
+            tracing::warn!(
+                provider = %failure.provider_id,
+                stage = ?failure.stage,
+                retryable = failure.retryable,
+                error = %failure.message,
+                "external VCS refresh failed"
+            );
+        }
         let retry_at = Instant::now() + Duration::from_secs(30);
         for provider_id in &failed_providers {
             self.external_vcs_retry_after
@@ -138,18 +149,18 @@ impl App {
                 (workspace
                     .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
                     == Some(result.resolved_identity_cwd))
-                .then_some(result.state)
-                .flatten()
+                .then_some(result.observation)
             });
-            let next = if next.is_none()
-                && workspace
-                    .cached_external_vcs
-                    .as_ref()
-                    .is_some_and(|state| failed_providers.contains(&state.provider_id))
-            {
-                workspace.cached_external_vcs.clone()
-            } else {
-                next
+            let next = match next {
+                Some(crate::events::ExternalVcsObservation::Present(state)) => Some(state),
+                Some(crate::events::ExternalVcsObservation::Absent) => None,
+                Some(crate::events::ExternalVcsObservation::Unavailable { provider_id }) => {
+                    debug_assert!(failed_providers.contains(&provider_id));
+                    workspace.cached_external_vcs.clone()
+                }
+                Some(crate::events::ExternalVcsObservation::NotExamined) | None => {
+                    workspace.cached_external_vcs.clone()
+                }
             };
             if workspace.cached_external_vcs != next {
                 workspace.cached_external_vcs = next;
@@ -1478,6 +1489,17 @@ mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
 
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
         let status = std::process::Command::new("git")
@@ -2565,5 +2587,63 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+
+    #[test]
+    fn external_vcs_refresh_distinguishes_unavailable_from_absent() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("workspace")];
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let cwd = app.state.workspaces[0]
+            .resolved_identity_cwd_from(&app.state.terminals, &app.terminal_runtimes)
+            .unwrap_or_else(|| app.state.workspaces[0].identity_cwd.clone());
+        let cached = crate::workspace::ExternalVcsState {
+            provider_id: "arc".into(),
+            provider_display_name: "Arc".into(),
+            repository_root: cwd.clone(),
+            repository_key: "arc:repo".into(),
+            capabilities: std::collections::BTreeSet::new(),
+            checkout_directory: None,
+            branch: Some("main".into()),
+            ahead: None,
+            behind: None,
+        };
+        app.state.workspaces[0].cached_external_vcs = Some(cached.clone());
+        app.external_vcs_refresh_in_flight = Some(7);
+
+        app.handle_external_vcs_refreshed(
+            app.vcs_registry.generation(),
+            7,
+            vec![crate::events::ExternalVcsRefreshResult {
+                workspace_id: workspace_id.clone(),
+                resolved_identity_cwd: cwd.clone(),
+                observation: crate::events::ExternalVcsObservation::Unavailable {
+                    provider_id: "arc".into(),
+                },
+            }],
+            Vec::new(),
+            vec![crate::events::ExternalVcsFailure {
+                provider_id: "arc".into(),
+                stage: crate::events::ExternalVcsFailureStage::Inspect,
+                retryable: true,
+                message: "temporary".into(),
+            }],
+        );
+        assert_eq!(app.state.workspaces[0].cached_external_vcs, Some(cached));
+
+        app.external_vcs_refresh_in_flight = Some(8);
+        app.handle_external_vcs_refreshed(
+            app.vcs_registry.generation(),
+            8,
+            vec![crate::events::ExternalVcsRefreshResult {
+                workspace_id,
+                resolved_identity_cwd: cwd,
+                observation: crate::events::ExternalVcsObservation::Absent,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(app.state.workspaces[0].cached_external_vcs.is_none());
     }
 }
