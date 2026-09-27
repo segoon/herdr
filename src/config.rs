@@ -10,6 +10,8 @@ mod theme;
 mod window_title;
 mod write;
 
+#[cfg(test)]
+pub use self::model::VcsProviderConfig;
 pub use self::{
     io::{
         config_diagnostic_summary, config_dir, config_path, load_live_config,
@@ -26,7 +28,8 @@ pub use self::{
         ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, PaneBordersConfig,
         ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
         ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        UpdateChannelConfig, VcsConfig, VcsDiscoveryMarkerConfig, VcsDiscoveryMarkerKind,
+        MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -121,6 +124,11 @@ impl Config {
             .chain(self.ui.sound.diagnostics())
             .chain(tab_bar_right_diagnostics(&self.ui.tab_bar_right))
             .chain(window_title_diagnostics(&self.ui.window_title))
+            .chain(
+                crate::vcs::validate_config(&self.vcs)
+                    .into_iter()
+                    .map(|message| format!("invalid VCS provider config: {message}")),
+            )
             .chain(self.invalid_sidebar_bounds_diagnostic())
             .chain(self.invalid_headless_size_diagnostic())
             .collect()

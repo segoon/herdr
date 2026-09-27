@@ -119,6 +119,8 @@ class CollectKeysTests(unittest.TestCase):
 
         self.assertNotIn("keys.command", keys)
         self.assertNotIn("keys.command.key", keys)
+        self.assertNotIn("vcs.providers", keys)
+        self.assertNotIn("vcs.providers.id", keys)
 
     def test_unlisted_vec_of_struct_subtree_is_an_error(self) -> None:
         model = sample_model()

@@ -1,0 +1,36 @@
+---
+title: 外部 VCS 提供程序协议
+description: 为 Herdr 实现树外版本控制适配器。
+---
+
+外部提供程序是一个短生命周期的可执行程序，将 VCS 特有模型转换为 Herdr 的规范模型。每次请求时，Herdr 启动一个进程，向标准输入写入一个 JSON 对象并关闭输入，然后从标准输出读取一个 JSON 响应。标准错误仅用于诊断。
+
+## 信封
+
+请求包含 `protocol_version: 1`、数字 `request_id` 和 `operation`。响应重复版本与 ID；成功时返回 `status: "ok"` 和 `response`，失败时返回 `status: "error"` 和 `error`。`error` 包含稳定的 `code`、可显示的 `message` 和 `retryable`。
+
+## 精确路径
+
+路径格式为 `{ "encoding": "utf8", "value": "/absolute/path" }`。Unix 非 UTF-8 路径使用 `unix_bytes_base64`，Windows UTF-16LE 代码单元使用 `windows_utf16_le_base64`。响应中的路径必须是绝对路径且不能包含 NUL。
+
+## 操作
+
+### `describe`
+
+返回 `inspect`、`checkout.list`、`checkout.create`、`checkout.remove`、`checkout.remove.force` 的任意受支持子集。Herdr 忽略未知能力，只启用同时出现在配置 `allow` 中的操作。
+
+### `inspect`
+
+接收最多 256 个 `roots`。响应的 `items` 为每个 `root` 返回可选的 `branch`、`ahead` 和 `behind`。VCS 无法提供的信息应省略。
+
+### `checkout.list`
+
+接收一个 `root` 并返回 `checkouts`。每项包含稳定且不透明的 `id`、显示用 `name`、绝对 `path` 和 `managed`。
+
+### `checkout.create`
+
+接收 `root`、用户输入的 `name` 和绝对 `destination`，并返回新建的 checkout。提供程序决定如何映射到原生分支或检出模型。
+
+### `checkout.remove`
+
+接收 `root`、绝对 checkout 路径和 `force`。只有普通删除和强制删除能力都已允许并协商时，Herdr 才发送 `force: true`。删除由提供程序执行；Herdr 不会递归删除外部 checkout。打开已有 checkout 是 Herdr 工作区操作，因此没有对应的提供程序请求。

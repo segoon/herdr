@@ -110,6 +110,10 @@ Git 工作区行提供 worktree 操作。`New worktree` 会创建检出：如果
 
 删除 worktree 检出需要显式操作。在归组的子工作区上使用 `Delete worktree checkout...` 来运行 `git worktree remove`。Herdr 会先请求 Git 安全删除。如果 Git 因检出中存在已修改或未跟踪的文件而拒绝，Herdr 会在强制删除前再次确认。分支不会被删除。
 
+### 外部版本控制提供程序
+
+非 Git 系统可以通过 `[[vcs.providers]]` 注册单独分发的可执行程序。Herdr 使用稳定的 JSON 协议，VCS 特有的命令和输出解析由提供程序负责。`command` 是不经过 shell 的 argv 数组。`discovery` 标记路径必须是相对字面路径，不能包含 `..` 或 glob。可用操作是 Herdr 支持范围、配置 `allow` 与 `describe` 所声明能力的交集。配置示例和完整契约见[外部 VCS 提供程序协议](/zh-cn/docs/vcs-provider-protocol/)。
+
 ## 远程连接
 
 远程连接默认使用临时保活设置，并在支持时复用连接，以管理 SSH 连接。

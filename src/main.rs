@@ -59,6 +59,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod vcs;
 mod workspace;
 mod worktree;
 
@@ -228,6 +229,21 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # [worktrees]
 # directory = "~/.herdr/worktrees"
+
+# Register out-of-tree version-control adapters. Herdr speaks a stable JSON
+# protocol to the adapter; the adapter owns all VCS-specific commands/parsing.
+# [[vcs.providers]]
+# id = "private-vcs"
+# display_name = "Private VCS"
+# protocol = "stdio-json-v1"
+# command = ["private-vcs-herdr-provider"]
+# platforms = ["linux", "macos", "windows"]
+# priority = 100
+# checkout_directory = "~/.herdr/checkouts/private-vcs"
+# discovery = [{ path = ".private/HEAD", type = "file" }]
+# allow = ["inspect", "checkout.list", "checkout.create", "checkout.remove"]
+# status_timeout_ms = 2000
+# operation_timeout_ms = 120000
 
 [ui]
 # Sidebar width (auto-scaled based on workspace names, this sets the default)

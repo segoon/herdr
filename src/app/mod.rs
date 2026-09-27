@@ -119,6 +119,7 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) vcs_registry: crate::vcs::Registry,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
@@ -565,6 +566,8 @@ impl App {
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
+        let vcs_registry = crate::vcs::Registry::from_config(&config.vcs, 1)
+            .unwrap_or_else(|_| crate::vcs::Registry::empty(1));
 
         let mut app = Self {
             config_diagnostic_deadline: None,
@@ -581,6 +584,7 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            vcs_registry,
             pending_api_worktree_creates: HashMap::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             pending_api_worktree_removes: HashMap::new(),
@@ -945,6 +949,18 @@ impl App {
         if !invalid_section("worktrees") {
             self.state.worktree_directory =
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
+        }
+
+        if !invalid_section("vcs") {
+            let generation = self.vcs_registry.generation().saturating_add(1);
+            match crate::vcs::Registry::from_config(&config.vcs, generation) {
+                Ok(registry) => self.vcs_registry = registry,
+                Err(provider_diagnostics) => {
+                    diagnostics.extend(provider_diagnostics.into_iter().map(|message| {
+                        format!("invalid VCS provider config: {message}; kept current vcs settings")
+                    }))
+                }
+            }
         }
 
         if !invalid_section("theme") {
@@ -1789,6 +1805,36 @@ mod tests {
         let report = app.apply_live_config(&config, &[], &["session".into()], false);
         assert!(report.diagnostics.is_empty());
         assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn live_vcs_config_atomically_replaces_registry_and_keeps_invalid_section() {
+        let mut app = test_app();
+        assert_eq!(app.vcs_registry.generation(), 1);
+        assert!(app.vcs_registry.providers().is_empty());
+
+        let mut config = Config::default();
+        config.vcs.providers.push(crate::config::VcsProviderConfig {
+            id: "private-vcs".into(),
+            display_name: "Private VCS".into(),
+            command: vec!["private-vcs-provider".into()],
+            platforms: vec![std::env::consts::OS.into()],
+            discovery: vec![crate::config::VcsDiscoveryMarkerConfig {
+                path: ".private/HEAD".into(),
+                kind: crate::config::VcsDiscoveryMarkerKind::File,
+            }],
+            allow: vec!["inspect".into()],
+            ..crate::config::VcsProviderConfig::default()
+        });
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.vcs_registry.generation(), 2);
+        assert_eq!(app.vcs_registry.providers().len(), 1);
+
+        let report = app.apply_live_config(&Config::default(), &[], &["vcs".into()], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.vcs_registry.generation(), 2);
+        assert_eq!(app.vcs_registry.providers().len(), 1);
     }
 
     #[test]

@@ -16,6 +16,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "theme",
     "ui",
     "update",
+    "vcs",
     "worktrees",
 ];
 
@@ -361,6 +362,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
     load_live_section(
         table,
+        "vcs",
+        "VCS provider config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.vcs = section,
+    );
+    load_live_section(
+        table,
         "experimental",
         "experimental config",
         &mut diagnostics,
@@ -377,6 +386,15 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
     );
 
     diagnostics.extend(config.theme.diagnostics());
+    let vcs_diagnostics = crate::vcs::validate_config(&config.vcs);
+    if !vcs_diagnostics.is_empty() {
+        diagnostics.extend(vcs_diagnostics.into_iter().map(|message| {
+            format!("invalid VCS provider config: {message}; keeping current vcs settings")
+        }));
+        if !invalid_sections.iter().any(|section| section == "vcs") {
+            invalid_sections.push("vcs".into());
+        }
+    }
 
     Ok(LoadedConfig {
         config,
@@ -898,6 +916,52 @@ resume_agents_on_restore = true
         assert!(loaded.config.session.resume_agents_on_restore);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_parses_external_vcs_provider_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[[vcs.providers]]
+id = "private-vcs"
+display_name = "Private VCS"
+protocol = "stdio-json-v1"
+command = ["private-vcs-herdr-provider", "--stdio"]
+platforms = ["linux", "macos", "windows"]
+priority = 100
+checkout_directory = "~/.herdr/checkouts/private-vcs"
+allow = ["inspect", "checkout.list", "checkout.create", "checkout.remove"]
+status_timeout_ms = 1500
+operation_timeout_ms = 90000
+discovery = [{ path = ".private/HEAD", type = "file" }]
+"#,
+        )
+        .unwrap();
+
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+        assert_eq!(loaded.config.vcs.providers.len(), 1);
+        assert_eq!(loaded.config.vcs.providers[0].id, "private-vcs");
+    }
+
+    #[test]
+    fn load_live_config_rejects_unsafe_vcs_marker_as_a_whole_section() {
+        let loaded = load_live_config_from_str(
+            r#"
+[[vcs.providers]]
+id = "private-vcs"
+display_name = "Private VCS"
+command = ["private-vcs-herdr-provider"]
+discovery = [{ path = "../.private/HEAD", type = "file" }]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.invalid_sections, vec!["vcs"]);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("relative literal path")));
     }
 
     #[test]
