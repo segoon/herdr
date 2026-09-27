@@ -176,7 +176,7 @@ pub enum AppEvent {
         exit_reason: crate::platform::ChildExitReason,
     },
     /// A worktree-removal runtime could not be restored normally.
-    WorktreeRuntimeRestoreFailed {
+    CheckoutRuntimeRestoreFailed {
         pane_id: PaneId,
         operation_id: u64,
     },

@@ -13,6 +13,7 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod checkout_runtime;
 mod creation;
 mod custom_commands;
 mod external_vcs_refresh;
@@ -26,6 +27,7 @@ mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+mod vcs_workspace;
 mod window_title;
 mod worktrees;
 
@@ -130,8 +132,8 @@ pub struct App {
     pub(crate) external_vcs_retry_after: HashMap<String, Instant>,
     pub(crate) checkout_requests: api::checkout_requests::CheckoutRequests,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    pub(crate) pending_worktree_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
-    pub(crate) pending_worktree_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
+    pub(crate) pending_checkout_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
+    pub(crate) pending_checkout_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
@@ -600,8 +602,8 @@ impl App {
             external_vcs_retry_after: HashMap::new(),
             checkout_requests: api::checkout_requests::CheckoutRequests::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
-            pending_worktree_remove_runtime_exits: HashMap::new(),
-            pending_worktree_remove_runtime_restores: HashMap::new(),
+            pending_checkout_remove_runtime_exits: HashMap::new(),
+            pending_checkout_remove_runtime_restores: HashMap::new(),
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             next_agent_manifest_update_check: manifest_check_enabled

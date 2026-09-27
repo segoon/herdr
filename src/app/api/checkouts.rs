@@ -10,6 +10,7 @@ use crate::events::{
 use crate::vcs::ExactPath;
 
 use super::responses::{encode_error, encode_success};
+use crate::app::vcs_workspace::CheckoutWorkspaceCandidate;
 use crate::app::App;
 
 impl App {
@@ -110,7 +111,7 @@ impl App {
                 ));
                 return true;
             };
-            let panes = self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
+            let panes = self.shutdown_workspace_terminal_runtimes_for_checkout_remove(ws_idx);
             mutation = Some(ExternalCheckoutMutation::Remove {
                 operation_id,
                 workspace_id: params.workspace_id.clone(),
@@ -338,10 +339,11 @@ impl App {
         }
         if result.result.is_err() && !outcome_unknown {
             if let Some(recovery) = result.removal_recovery.as_ref() {
-                let _ = self.restore_shutdown_worktree_panes(
+                let _ = self.restore_shutdown_checkout_panes(
                     &recovery.shutdown_panes,
                     recovery.operation_id,
                     &recovery.path,
+                    crate::app::checkout_runtime::CheckoutBackendKind::External,
                 );
             }
         }
@@ -397,7 +399,12 @@ impl App {
                         },
                     );
                 }
-                let _ = self.restore_shutdown_worktree_panes(&shutdown_panes, operation_id, &path);
+                let _ = self.restore_shutdown_checkout_panes(
+                    &shutdown_panes,
+                    operation_id,
+                    &path,
+                    crate::app::checkout_runtime::CheckoutBackendKind::External,
+                );
                 encode_success(
                     result.id,
                     ResponseResult::CheckoutRemoved {
@@ -427,36 +434,14 @@ impl App {
                 "provider returned an invalid checkout path",
             );
         };
-        let canonical = crate::worktree::canonical_or_original(&path);
-        let already = self
-            .state
-            .workspaces
-            .iter()
-            .position(|workspace| {
-                workspace.checkout_space.as_ref().is_some_and(|membership| {
-                    crate::worktree::canonical_or_original(&membership.checkout_path) == canonical
-                })
-            })
-            .or_else(|| {
-                self.state.workspaces.iter().position(|workspace| {
-                    workspace
-                        .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
-                        .is_some_and(|cwd| {
-                            crate::worktree::canonical_or_original(&cwd).starts_with(&canonical)
-                        })
-                })
-            });
-        let (ws_idx, created_workspace) = match already {
-            Some(index) => {
-                if focus {
-                    self.state.switch_workspace(index);
-                }
-                (index, false)
-            }
-            None => match self.create_workspace_with_options(path.clone(), focus) {
-                Ok(index) => (index, true),
-                Err(error) => return encode_error(id, "checkout_open_failed", error.to_string()),
-            },
+        let already = self.open_workspace_idx_for_external_checkout(&path);
+        let candidate = already.map(|index| CheckoutWorkspaceCandidate {
+            index,
+            created: false,
+        });
+        let opened = match self.open_or_create_checkout_workspace(&path, candidate, focus) {
+            Ok(opened) => opened,
+            Err(error) => return encode_error(id, "checkout_open_failed", error),
         };
         if let Some(source_id) = source.source_workspace_id.as_ref() {
             if let Some(source_idx) = self
@@ -488,7 +473,7 @@ impl App {
                 }
             }
         }
-        self.state.workspaces[ws_idx].checkout_space =
+        self.state.workspaces[opened.index].checkout_space =
             Some(crate::workspace::CheckoutSpaceMembership {
                 provider_id: source.provider_id.clone(),
                 provider_display_name: source.provider_name.clone(),
@@ -501,42 +486,31 @@ impl App {
                 source_workspace_id: source.source_workspace_id.clone(),
             });
         if let Some(label) = label {
-            self.state.workspaces[ws_idx].set_custom_name(label);
+            self.state.workspaces[opened.index].set_custom_name(label);
         }
-        self.state.mark_session_dirty();
+        self.finalize_checkout_workspace_open(opened);
         self.external_vcs_identity_refresh_requested = true;
         self.mark_external_vcs_refresh_due(std::time::Instant::now());
-        if created_workspace {
-            self.emit_workspace_open_events(ws_idx);
-        }
-        let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let info = self.checkout_info(checkout).unwrap_or(CheckoutInfo {
             id: String::new(),
             name: path.display().to_string(),
             path: path.display().to_string(),
             managed: false,
-            open_workspace_id: Some(self.public_workspace_id(ws_idx)),
+            open_workspace_id: Some(self.public_workspace_id(opened.index)),
         });
+        let records = self.checkout_workspace_records(opened.index);
         let payload = if created {
             ResponseResult::CheckoutCreated {
-                workspace: self.workspace_info(ws_idx),
-                tab: self
-                    .tab_info(ws_idx, tab_idx)
-                    .expect("checkout workspace tab"),
-                root_pane: self
-                    .root_pane_info(ws_idx, tab_idx)
-                    .expect("checkout workspace pane"),
+                workspace: records.workspace,
+                tab: records.tab,
+                root_pane: records.root_pane,
                 checkout: info,
             }
         } else {
             ResponseResult::CheckoutOpened {
-                workspace: self.workspace_info(ws_idx),
-                tab: self
-                    .tab_info(ws_idx, tab_idx)
-                    .expect("checkout workspace tab"),
-                root_pane: self
-                    .root_pane_info(ws_idx, tab_idx)
-                    .expect("checkout workspace pane"),
+                workspace: records.workspace,
+                tab: records.tab,
+                root_pane: records.root_pane,
                 checkout: info,
                 already_open: already.is_some(),
             }
@@ -825,13 +799,17 @@ mod tests {
     use crate::workspace::{CheckoutSpaceMembership, Workspace};
 
     fn test_app() -> App {
+        test_app_with_event_hub(crate::api::EventHub::default())
+    }
+
+    fn test_app_with_event_hub(event_hub: crate::api::EventHub) -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         App::new(
             &Config::default(),
             crate::app::AppPolicy::TEST,
             None,
             api_rx,
-            crate::api::EventHub::default(),
+            event_hub,
         )
     }
 
@@ -846,6 +824,206 @@ mod tests {
             capabilities: std::collections::BTreeSet::new(),
             source_checkout: None,
         }
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn external_checkout_open_creates_then_reuses_workspace() {
+        let root = unique_temp_path("external-checkout-open");
+        let checkout_path = root.join("topic");
+        std::fs::create_dir_all(&checkout_path).expect("create checkout directory");
+        let event_hub = crate::api::EventHub::default();
+        let mut app = test_app_with_event_hub(event_hub.clone());
+        let source = ExternalCheckoutSource {
+            repository_root: root.clone(),
+            source_cwd: root.clone(),
+            ..source()
+        };
+        let checkout = crate::vcs::Checkout {
+            id: "topic-id".into(),
+            name: "topic".into(),
+            path: ExactPath::from_path(&checkout_path),
+            managed: true,
+        };
+
+        let created: SuccessResponse = serde_json::from_str(&app.finish_external_checkout_open(
+            "create".into(),
+            source.clone(),
+            checkout.clone(),
+            Some("Topic".into()),
+            true,
+            true,
+        ))
+        .expect("created checkout response");
+        let ResponseResult::CheckoutCreated {
+            workspace,
+            tab,
+            root_pane,
+            ..
+        } = created.result
+        else {
+            panic!("expected checkout_created response");
+        };
+        assert_eq!(tab.workspace_id, workspace.workspace_id);
+        assert_eq!(root_pane.workspace_id, workspace.workspace_id);
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].custom_name.as_deref(),
+            Some("Topic")
+        );
+        assert_eq!(
+            app.state.workspaces[0]
+                .checkout_space
+                .as_ref()
+                .map(|membership| membership.checkout_id.as_str()),
+            Some("topic-id")
+        );
+        let created_events = event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, event)| event.event)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            created_events,
+            vec![
+                crate::api::schema::EventKind::WorkspaceCreated,
+                crate::api::schema::EventKind::TabCreated,
+                crate::api::schema::EventKind::PaneCreated,
+                crate::api::schema::EventKind::LayoutUpdated,
+            ]
+        );
+        let sequence_after_create = event_hub.current_sequence();
+
+        let opened: SuccessResponse = serde_json::from_str(&app.finish_external_checkout_open(
+            "open".into(),
+            source,
+            checkout,
+            None,
+            true,
+            false,
+        ))
+        .expect("opened checkout response");
+        let ResponseResult::CheckoutOpened { already_open, .. } = opened.result else {
+            panic!("expected checkout_opened response");
+        };
+        assert!(already_open);
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.active, Some(0));
+        assert!(event_hub.events_after(sequence_after_create).is_empty());
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        drop(app);
+        std::fs::remove_dir_all(root).expect("remove checkout directory");
+    }
+
+    #[tokio::test]
+    async fn failed_external_remove_restores_its_checkout_runtime() {
+        let root = unique_temp_path("external-checkout-remove-failure");
+        let checkout_path = root.join("external");
+        let git_path = root.join("git");
+        std::fs::create_dir_all(&checkout_path).expect("create external checkout");
+        std::fs::create_dir_all(&git_path).expect("create git checkout");
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("external");
+        workspace.identity_cwd = checkout_path.clone();
+        workspace.checkout_space = Some(CheckoutSpaceMembership {
+            provider_id: "arc".into(),
+            provider_display_name: "Arc".into(),
+            repository_key: "arc:repo".into(),
+            repository_root: root.clone(),
+            checkout_id: "external-id".into(),
+            checkout_name: "external".into(),
+            checkout_path: checkout_path.clone(),
+            managed: true,
+            source_workspace_id: None,
+        });
+        // Explicitly exercise a workspace with both legacy memberships. Runtime
+        // recovery must use the backend that initiated the removal.
+        workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "git:repo".into(),
+            label: "git".into(),
+            repo_root: git_path.clone(),
+            checkout_path: git_path,
+            is_linked_worktree: true,
+        });
+        let workspace_id = workspace.id.clone();
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        let foreground = Workspace::test_new("foreground");
+        let foreground_id = foreground.id.clone();
+        app.state.workspaces = vec![workspace, foreground];
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.ensure_test_terminals();
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = checkout_path.clone();
+        let (runtime, _input_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.terminal_runtimes.insert(terminal_id.clone(), runtime);
+
+        let shutdown_panes = app.shutdown_workspace_terminal_runtimes_for_checkout_remove(0);
+        assert_eq!(shutdown_panes, vec![pane_id]);
+        let checkout_key = crate::worktree::canonical_or_original(&checkout_path);
+        let operation_id = app
+            .checkout_requests
+            .reserve_remove(workspace_id.clone(), checkout_key.clone())
+            .unwrap();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+
+        app.handle_external_checkout_finished(ExternalCheckoutResult {
+            id: "remove".into(),
+            source: ExternalCheckoutSource {
+                repository_root: root.clone(),
+                source_cwd: checkout_path.clone(),
+                ..source()
+            },
+            registry_generation: app.vcs_registry.generation(),
+            mutation: Some(ExternalCheckoutMutation::Remove {
+                operation_id,
+                workspace_id: workspace_id.clone(),
+                checkout_key,
+            }),
+            respond_to,
+            result: Err(("vcs_operation_failed".into(), "simulated failure".into())),
+            removal_recovery: Some(ExternalCheckoutRemovalRecovery {
+                path: checkout_path.clone(),
+                shutdown_panes,
+                operation_id,
+            }),
+        });
+
+        let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+        assert_eq!(response.error.code, "vcs_operation_failed");
+        assert!(app.checkout_requests.is_empty());
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.terminals[&terminal_id].cwd, checkout_path);
+        assert!(app
+            .pending_checkout_remove_runtime_restores
+            .contains_key(&pane_id));
+
+        app.handle_internal_event_with_pane_updates(AppEvent::PaneDied {
+            pane_id,
+            exit_reason: crate::platform::ChildExitReason::Exited,
+        });
+        assert!(app.pending_checkout_remove_runtime_exits.is_empty());
+        assert!(app.pending_checkout_remove_runtime_restores.is_empty());
+        assert!(app.terminal_runtimes.get(&terminal_id).is_some());
+        assert_eq!(
+            app.state.active.map(|idx| &app.state.workspaces[idx].id),
+            Some(&foreground_id)
+        );
+        assert_eq!(app.state.workspaces[app.state.selected].id, foreground_id);
+
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+        std::fs::remove_dir_all(root).expect("remove test checkout tree");
     }
 
     #[test]

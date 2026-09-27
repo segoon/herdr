@@ -4869,15 +4869,15 @@ fn terminal_attach_client_exits_when_worktree_runtime_restore_fails() {
     assert_eq!(server.terminal_attach_owners.get(&terminal_id), Some(&7));
     server
         .app
-        .pending_worktree_remove_runtime_exits
+        .pending_checkout_remove_runtime_exits
         .insert(pane_id, 1);
     server
         .app
-        .pending_worktree_remove_runtime_restores
+        .pending_checkout_remove_runtime_restores
         .insert(pane_id, 7);
 
     assert!(
-        server.handle_internal_event_with_forwarding(AppEvent::WorktreeRuntimeRestoreFailed {
+        server.handle_internal_event_with_forwarding(AppEvent::CheckoutRuntimeRestoreFailed {
             pane_id,
             operation_id: 7,
         })
@@ -4917,7 +4917,7 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
     );
     server
         .app
-        .pending_worktree_remove_runtime_exits
+        .pending_checkout_remove_runtime_exits
         .insert(pane_id, 1);
     let terminal_id = terminal_id.to_string();
     let (writer, control_rx, _render_rx) = test_client_writer();
@@ -4986,7 +4986,7 @@ fn expected_worktree_runtime_exit_does_not_release_agent() {
         );
     server
         .app
-        .pending_worktree_remove_runtime_exits
+        .pending_checkout_remove_runtime_exits
         .insert(pane_id, 1);
 
     assert!(

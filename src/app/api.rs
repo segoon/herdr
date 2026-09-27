@@ -28,7 +28,32 @@ enum RuntimeExitAction {
     ClosePane,
 }
 
+pub(super) struct CheckoutWorkspaceRecords {
+    pub(super) workspace: crate::api::schema::WorkspaceInfo,
+    pub(super) tab: crate::api::schema::TabInfo,
+    pub(super) root_pane: crate::api::schema::PaneInfo,
+}
+
 impl App {
+    pub(super) fn checkout_workspace_records(&self, ws_idx: usize) -> CheckoutWorkspaceRecords {
+        let workspace = self.workspace_info(ws_idx);
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .expect("checkout workspace should exist")
+            .active_tab;
+        CheckoutWorkspaceRecords {
+            workspace,
+            tab: self
+                .tab_info(ws_idx, tab_idx)
+                .expect("checkout workspace should have an active tab"),
+            root_pane: self
+                .root_pane_info(ws_idx, tab_idx)
+                .expect("checkout workspace should have an active root pane"),
+        }
+    }
+
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::GitStatusRefreshed {
@@ -184,11 +209,11 @@ impl App {
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
         let mut worktree_restore_failed = false;
         let ev = match ev {
-            AppEvent::WorktreeRuntimeRestoreFailed {
+            AppEvent::CheckoutRuntimeRestoreFailed {
                 pane_id,
                 operation_id,
             } => {
-                if !self.claim_worktree_runtime_restore_failure(pane_id, operation_id) {
+                if !self.claim_checkout_runtime_restore_failure(pane_id, operation_id) {
                     return Vec::new();
                 }
                 worktree_restore_failed = true;
@@ -300,10 +325,10 @@ impl App {
             }
             if worktree_restore_failed {
                 worktree_restore_updates
-                    .extend(self.publish_worktree_runtime_agent_release(*pane_id));
+                    .extend(self.publish_checkout_runtime_agent_release(*pane_id));
             } else {
                 let expected_exit = self
-                    .pending_worktree_remove_runtime_exits
+                    .pending_checkout_remove_runtime_exits
                     .get_mut(pane_id)
                     .map(|remaining| {
                         *remaining -= 1;
@@ -311,14 +336,14 @@ impl App {
                     });
                 if let Some(remove_entry) = expected_exit {
                     let restore_failed = if remove_entry {
-                        self.pending_worktree_remove_runtime_exits.remove(pane_id);
+                        self.pending_checkout_remove_runtime_exits.remove(pane_id);
                         let restore_requested = self
-                            .pending_worktree_remove_runtime_restores
+                            .pending_checkout_remove_runtime_restores
                             .remove(pane_id)
                             .is_some();
                         if restore_requested {
                             worktree_restore_updates
-                                .extend(self.publish_worktree_runtime_agent_release(*pane_id));
+                                .extend(self.publish_checkout_runtime_agent_release(*pane_id));
                         }
                         restore_requested && !self.respawn_shell_for_launch_pane(*pane_id, false)
                     } else {
@@ -656,80 +681,21 @@ impl App {
         }
     }
 
-    fn respawn_shell_for_launch_pane(
-        &mut self,
-        pane_id: crate::layout::PaneId,
-        focus_pane: bool,
-    ) -> bool {
-        let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
-            return false;
-        };
-        let terminal_id = pane_state.attached_terminal_id.clone();
-        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
-            return false;
-        };
-
-        let cwd = terminal.cwd.clone();
-        let (rows, cols) = self
-            .terminal_runtimes
-            .get(&terminal_id)
-            .map(|runtime| runtime.current_size())
-            .unwrap_or_else(|| self.state.estimate_pane_size());
-        let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
-            return false;
-        };
-        let runtime = match crate::terminal::TerminalRuntime::spawn(
-            pane_id,
-            rows,
-            cols,
-            cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            &launch_env,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        ) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                tracing::warn!(
-                    pane = pane_id.raw(),
-                    terminal = %terminal_id,
-                    err = %err,
-                    "failed to respawn shell after launch command exited"
-                );
-                return false;
-            }
-        };
-
-        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
-        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-            terminal.clear_agent_runtime_identity_after_respawn();
-        }
-        if focus_pane {
-            self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        }
-        self.schedule_session_save();
-        true
-    }
-
-    pub(crate) fn claim_worktree_runtime_restore_failure(
+    pub(crate) fn claim_checkout_runtime_restore_failure(
         &mut self,
         pane_id: crate::layout::PaneId,
         operation_id: u64,
     ) -> bool {
-        if self.pending_worktree_remove_runtime_restores.get(&pane_id) != Some(&operation_id) {
+        if self.pending_checkout_remove_runtime_restores.get(&pane_id) != Some(&operation_id) {
             return false;
         }
-        self.pending_worktree_remove_runtime_restores
+        self.pending_checkout_remove_runtime_restores
             .remove(&pane_id);
-        self.pending_worktree_remove_runtime_exits.remove(&pane_id);
+        self.pending_checkout_remove_runtime_exits.remove(&pane_id);
         true
     }
 
-    pub(crate) fn publish_worktree_runtime_agent_release(
+    pub(crate) fn publish_checkout_runtime_agent_release(
         &mut self,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::app::actions::PaneStateUpdate> {
@@ -742,22 +708,6 @@ impl App {
         self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
         self.emit_pane_state_update(&update);
         Some(update)
-    }
-
-    fn queue_worktree_runtime_restore_failed(
-        &self,
-        pane_id: crate::layout::PaneId,
-        operation_id: u64,
-    ) {
-        let event_tx = self.event_tx.clone();
-        tokio::spawn(async move {
-            let _ = event_tx
-                .send(AppEvent::WorktreeRuntimeRestoreFailed {
-                    pane_id,
-                    operation_id,
-                })
-                .await;
-        });
     }
 
     pub(crate) fn emit_pane_state_update(&mut self, update: &crate::app::actions::PaneStateUpdate) {
@@ -2504,29 +2454,29 @@ mod tests {
                 RuntimeExitAction::RespawnShell
             );
         }
-        app.pending_worktree_remove_runtime_exits.insert(pane_id, 1);
-        app.pending_worktree_remove_runtime_restores
+        app.pending_checkout_remove_runtime_exits.insert(pane_id, 1);
+        app.pending_checkout_remove_runtime_restores
             .insert(pane_id, 8);
 
-        app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
+        app.handle_internal_event(AppEvent::CheckoutRuntimeRestoreFailed {
             pane_id,
             operation_id: 7,
         });
         assert_eq!(
-            app.pending_worktree_remove_runtime_restores.get(&pane_id),
+            app.pending_checkout_remove_runtime_restores.get(&pane_id),
             Some(&8)
         );
         assert!(app.event_rx.try_recv().is_err());
 
-        app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
+        app.handle_internal_event(AppEvent::CheckoutRuntimeRestoreFailed {
             pane_id,
             operation_id: 8,
         });
 
         assert!(app.find_pane(pane_id).is_none());
         assert!(app.terminal_runtimes.get(&terminal_id).is_none());
-        assert!(app.pending_worktree_remove_runtime_exits.is_empty());
-        assert!(app.pending_worktree_remove_runtime_restores.is_empty());
+        assert!(app.pending_checkout_remove_runtime_exits.is_empty());
+        assert!(app.pending_checkout_remove_runtime_restores.is_empty());
     }
 
     #[test]
