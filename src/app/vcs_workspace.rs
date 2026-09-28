@@ -73,10 +73,13 @@ impl App {
             })
             .or_else(|| {
                 self.state.workspaces.iter().position(|workspace| {
+                    if workspace.checkout_space.is_some() || workspace.worktree_space().is_some() {
+                        return false;
+                    }
                     workspace
                         .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
                         .is_some_and(|cwd| {
-                            crate::worktree::canonical_or_original(&cwd).starts_with(&canonical)
+                            crate::worktree::canonical_or_original(&cwd) == canonical
                         })
                 })
             })
@@ -119,5 +122,58 @@ mod tests {
         assert!(!opened.created);
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn external_checkout_reuse_does_not_override_explicit_provenance() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state = AppState::test_new();
+        let mut workspace = Workspace::test_new("nested");
+        workspace.identity_cwd = "/repo/checkout/nested".into();
+        workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "git:repo".into(),
+            label: "git".into(),
+            repo_root: "/repo/checkout/nested".into(),
+            checkout_path: "/repo/checkout/nested".into(),
+            is_linked_worktree: true,
+        });
+        app.state.workspaces = vec![workspace];
+
+        assert_eq!(
+            app.open_workspace_idx_for_external_checkout(Path::new("/repo/checkout")),
+            None
+        );
+    }
+
+    #[test]
+    fn external_checkout_reuses_only_exact_unowned_workspace_path() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state = AppState::test_new();
+        let mut workspace = Workspace::test_new("checkout");
+        workspace.identity_cwd = "/repo/checkout".into();
+        app.state.workspaces = vec![workspace];
+
+        assert_eq!(
+            app.open_workspace_idx_for_external_checkout(Path::new("/repo/checkout")),
+            Some(0)
+        );
+        assert_eq!(
+            app.open_workspace_idx_for_external_checkout(Path::new("/repo")),
+            None
+        );
     }
 }

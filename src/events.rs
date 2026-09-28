@@ -83,6 +83,20 @@ pub(crate) struct ExternalCheckoutResult {
     pub(crate) removal_recovery: Option<ExternalCheckoutRemovalRecovery>,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExternalCheckoutRemovePrepared {
+    pub(crate) id: String,
+    pub(crate) source: ExternalCheckoutSource,
+    pub(crate) registry_generation: u64,
+    pub(crate) provider: crate::vcs::ActivatedProvider,
+    pub(crate) membership: crate::workspace::CheckoutSpaceMembership,
+    pub(crate) workspace_id: String,
+    pub(crate) checkout_key: std::path::PathBuf,
+    pub(crate) operation_id: u64,
+    pub(crate) force: bool,
+    pub(crate) respond_to: std::sync::mpsc::Sender<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ExternalCheckoutMutation {
     Create {
@@ -291,6 +305,7 @@ pub enum AppEvent {
         failures: Vec<ExternalVcsFailure>,
     },
     ExternalCheckoutFinished(Box<ExternalCheckoutResult>),
+    ExternalCheckoutRemovePrepared(Box<ExternalCheckoutRemovePrepared>),
     /// A configured tab bar status command finished.
     TabBarCommandFinished {
         generation: u64,

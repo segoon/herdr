@@ -141,7 +141,8 @@ without `..` or globs. The deepest matching repository root wins, followed by
 
 `allow` is a security and feature allowlist. An operation is available only when
 Herdr understands it, the config allows it, and the provider advertises it from
-`describe`. Force removal is independently gated by `checkout.remove.force`.
+`describe`. `checkout.remove` requires `checkout.list`; force removal is additionally
+gated by `checkout.remove.force`.
 Unknown advertised capabilities are ignored. See [External VCS provider
 protocol](/docs/vcs-provider-protocol/) for the JSON contract.
 

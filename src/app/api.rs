@@ -77,6 +77,10 @@ impl App {
                 self.handle_external_checkout_finished(*result);
                 true
             }
+            AppEvent::ExternalCheckoutRemovePrepared(prepared) => {
+                self.handle_external_checkout_remove_prepared(*prepared);
+                true
+            }
             AppEvent::TabBarCommandFinished {
                 generation,
                 segment_index,
@@ -254,6 +258,11 @@ impl App {
 
         if let AppEvent::ExternalCheckoutFinished(result) = ev {
             self.handle_external_checkout_finished(*result);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalCheckoutRemovePrepared(prepared) = ev {
+            self.handle_external_checkout_remove_prepared(*prepared);
             return Vec::new();
         }
 

@@ -569,27 +569,35 @@ impl HeadlessServer {
                     None,
                     location.as_ref(),
                 );
-                let mut vcs_projection = crate::server::client_shell::vcs_projection(
-                    &self.app,
-                    &self.client_shell_boot_id,
-                    client.shell_projection_revision,
-                );
                 candidate.config_diagnostic = if client.shell_uses_endpoint_keybindings {
                     self.server_config_diagnostic.clone()
                 } else {
                     self.server_config_diagnostic_without_keybindings.clone()
                 };
                 candidate.revision = client.shell_projection_revision;
+                let vcs_projection_changed =
+                    client
+                        .shell_vcs_projection
+                        .as_ref()
+                        .is_none_or(|projection| {
+                            !crate::server::client_shell::vcs_projection_matches(
+                                &self.app, projection,
+                            )
+                        });
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
-                    || client.shell_vcs_projection.as_ref() != Some(&vcs_projection)
+                    || vcs_projection_changed
                     || client.shell_agent_view != agent_view
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
                     candidate.revision = client.shell_projection_revision;
                     completions.revision = candidate.revision;
-                    vcs_projection.revision = candidate.revision;
+                    let vcs_projection = crate::server::client_shell::vcs_projection(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                        candidate.revision,
+                    );
                     let completion_framed =
                         match crate::protocol::endpoint::agent_completions_message(&completions)
                             .map_err(std::io::Error::other)

@@ -17,7 +17,7 @@ description: Herdr 用のアウトオブツリー VCS アダプターを実装�
 
 ### `describe`
 
-`inspect`、`checkout.list`、`checkout.create`、`checkout.remove`、`checkout.remove.force` の対応部分集合を返します。Herdr は未知の機能を無視し、設定の `allow` と共通する操作だけを有効にします。
+`inspect`、`checkout.list`、`checkout.create`、`checkout.remove`、`checkout.remove.force` の対応部分集合を返します。Herdr は未知の機能を無視し、設定の `allow` と共通する操作だけを有効にします。`checkout.remove` には、削除前の検証とタイムアウト後の照合に使う `checkout.list` も必要です。
 
 ### `inspect`
 

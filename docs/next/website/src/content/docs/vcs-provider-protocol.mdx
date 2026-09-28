@@ -87,7 +87,9 @@ The provider returns any supported subset of:
 - `checkout.remove.force`
 
 Herdr intersects this list with its own supported set and the provider's configured
-`allow` list. `describe` itself is always permitted.
+`allow` list. `checkout.remove` additionally requires `checkout.list`, which Herdr
+uses to validate the managed checkout before stopping its workspace runtimes and
+to reconcile timeouts. `describe` itself is always permitted.
 
 ### `inspect`
 

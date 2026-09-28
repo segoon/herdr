@@ -1609,7 +1609,9 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::ExternalVcsRefreshed { .. } => Vec::new(),
-            AppEvent::ExternalCheckoutFinished(_) => Vec::new(),
+            AppEvent::ExternalCheckoutFinished(_) | AppEvent::ExternalCheckoutRemovePrepared(_) => {
+                Vec::new()
+            }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::WorktreeReadFinished(_) => Vec::new(),

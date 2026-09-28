@@ -4,12 +4,6 @@
 //! model to this protocol, so Herdr never needs to know a proprietary VCS's
 //! command line or output format.
 
-// The v1 boundary deliberately defines all negotiated operations together even
-// though upstream runtime projections adopt them incrementally. Keeping the
-// complete contract in one module prevents provider implementations from having
-// to chase Git-shaped intermediate APIs.
-#![allow(dead_code)]
-
 use std::{
     collections::{BTreeSet, HashSet},
     ffi::OsStr,
@@ -119,15 +113,8 @@ impl ExternalProvider {
             .await?
         {
             ResponseOperation::Describe { capabilities } => {
-                let advertised = capabilities
-                    .iter()
-                    .filter_map(|value| Capability::parse(value))
-                    .collect::<BTreeSet<_>>();
-                let effective_capabilities = self
-                    .allowed_capabilities
-                    .intersection(&advertised)
-                    .copied()
-                    .collect();
+                let effective_capabilities =
+                    negotiate_capabilities(&self.allowed_capabilities, &capabilities);
                 Ok(ActivatedProvider {
                     provider: self.clone(),
                     effective_capabilities,
@@ -433,6 +420,25 @@ impl ExternalProvider {
     }
 }
 
+fn negotiate_capabilities(
+    allowed: &BTreeSet<Capability>,
+    advertised: &[String],
+) -> BTreeSet<Capability> {
+    let advertised = advertised
+        .iter()
+        .filter_map(|value| Capability::parse(value))
+        .collect::<BTreeSet<_>>();
+    let mut effective = allowed
+        .intersection(&advertised)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if !effective.contains(&Capability::CheckoutList) {
+        effective.remove(&Capability::CheckoutRemove);
+        effective.remove(&Capability::CheckoutRemoveForce);
+    }
+    effective
+}
+
 fn validate_response_path(path: &ExactPath) -> Result<PathBuf, ProviderFailure> {
     let path = path.to_path_buf().map_err(ProviderFailure::Protocol)?;
     if path.is_absolute() {
@@ -526,13 +532,6 @@ impl ActivatedProvider {
 
     pub(crate) fn checkout_directory(&self) -> Option<&Path> {
         self.provider.checkout_directory()
-    }
-
-    pub(crate) fn capability_names(&self) -> Vec<String> {
-        self.effective_capabilities
-            .iter()
-            .map(|capability| capability.as_str().to_owned())
-            .collect()
     }
 
     pub(crate) fn capabilities(&self) -> BTreeSet<Capability> {
@@ -851,6 +850,19 @@ pub(crate) fn validate_config(config: &VcsConfig) -> Vec<String> {
         {
             diagnostics.push(format!(
                 "{label} allows checkout.remove.force without checkout.remove"
+            ));
+        }
+        if provider
+            .allow
+            .iter()
+            .any(|capability| capability == "checkout.remove")
+            && !provider
+                .allow
+                .iter()
+                .any(|capability| capability == "checkout.list")
+        {
+            diagnostics.push(format!(
+                "{label} allows checkout.remove without checkout.list"
             ));
         }
         if !(MIN_TIMEOUT_MS..=MAX_STATUS_TIMEOUT_MS).contains(&provider.status_timeout_ms) {
@@ -1193,6 +1205,15 @@ mod tests {
         assert!(validate_config(&config)
             .iter()
             .any(|message| message.contains("duplicate VCS provider id")));
+
+        let mut remove_without_list = provider("remove-only", 10, ".private/HEAD");
+        remove_without_list.allow = vec!["checkout.remove".into()];
+        let diagnostics = validate_config(&VcsConfig {
+            providers: vec![remove_without_list],
+        });
+        assert!(diagnostics
+            .iter()
+            .any(|message| message.contains("checkout.remove without checkout.list")));
     }
 
     #[test]
@@ -1263,6 +1284,28 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(effective, [Capability::Inspect].into_iter().collect());
         assert_eq!(Capability::Inspect.as_str(), "inspect");
+    }
+
+    #[test]
+    fn removal_is_not_effective_without_list_capability() {
+        let allowed = [
+            Capability::CheckoutList,
+            Capability::CheckoutRemove,
+            Capability::CheckoutRemoveForce,
+        ]
+        .into_iter()
+        .collect();
+        let advertised = vec!["checkout.remove".into(), "checkout.remove.force".into()];
+
+        assert!(negotiate_capabilities(&allowed, &advertised).is_empty());
+
+        let advertised = vec!["checkout.list".into(), "checkout.remove".into()];
+        assert_eq!(
+            negotiate_capabilities(&allowed, &advertised),
+            [Capability::CheckoutList, Capability::CheckoutRemove]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

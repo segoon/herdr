@@ -17,7 +17,7 @@ description: 为 Herdr 实现树外版本控制适配器。
 
 ### `describe`
 
-返回 `inspect`、`checkout.list`、`checkout.create`、`checkout.remove`、`checkout.remove.force` 的任意受支持子集。Herdr 忽略未知能力，只启用同时出现在配置 `allow` 中的操作。
+返回 `inspect`、`checkout.list`、`checkout.create`、`checkout.remove`、`checkout.remove.force` 的任意受支持子集。Herdr 忽略未知能力，只启用同时出现在配置 `allow` 中的操作。`checkout.remove` 还要求 `checkout.list`，用于删除前验证以及超时后的结果核对。
 
 ### `inspect`
 
