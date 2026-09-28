@@ -1695,6 +1695,110 @@
           ],
           "type": "object"
         },
+        "CheckoutCreateParams": {
+          "properties": {
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destination": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "CheckoutListParams": {
+          "properties": {
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "CheckoutOpenParams": {
+          "properties": {
+            "checkout_id": {
+              "type": "string"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "checkout_id"
+          ],
+          "type": "object"
+        },
+        "CheckoutRemoveParams": {
+          "properties": {
+            "force": {
+              "default": false,
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "ClientShellSurfaceSetParams": {
           "description": "Updates whether the requesting client shell receives and controls pane presentation.",
           "properties": {
@@ -4346,6 +4450,18 @@
           ],
           "type": "string"
         },
+        "VcsStatusInterestSetParams": {
+          "description": "Updates whether the requesting client needs periodically refreshed VCS status.",
+          "properties": {
+            "interested": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "interested"
+          ],
+          "type": "object"
+        },
         "WorkspaceCloseParams": {
           "properties": {
             "close_group": {
@@ -4888,6 +5004,22 @@
         {
           "properties": {
             "method": {
+              "const": "vcs.status_interest.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/VcsStatusInterestSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "session.snapshot",
               "type": "string"
             },
@@ -5101,6 +5233,70 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorktreeRemoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "checkout.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CheckoutListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "checkout.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CheckoutCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "checkout.open",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CheckoutOpenParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "checkout.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/CheckoutRemoveParams"
             }
           },
           "required": [
@@ -6755,6 +6951,65 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "CheckoutInfo": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "managed": {
+              "type": "boolean"
+            },
+            "name": {
+              "type": "string"
+            },
+            "open_workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "path",
+            "managed"
+          ],
+          "type": "object"
+        },
+        "CheckoutSourceInfo": {
+          "properties": {
+            "capabilities": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "provider_id": {
+              "type": "string"
+            },
+            "provider_name": {
+              "type": "string"
+            },
+            "repository_key": {
+              "type": "string"
+            },
+            "repository_root": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider_id",
+            "provider_name",
+            "repository_key",
+            "repository_root",
+            "capabilities"
+          ],
+          "type": "object"
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -9364,6 +9619,113 @@
             },
             {
               "properties": {
+                "checkouts": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/CheckoutInfo"
+                  },
+                  "type": "array"
+                },
+                "source": {
+                  "$ref": "#/schemas/success_response/$defs/CheckoutSourceInfo"
+                },
+                "type": {
+                  "const": "checkout_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "source",
+                "checkouts"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "checkout": {
+                  "$ref": "#/schemas/success_response/$defs/CheckoutInfo"
+                },
+                "root_pane": {
+                  "$ref": "#/schemas/success_response/$defs/PaneInfo"
+                },
+                "tab": {
+                  "$ref": "#/schemas/success_response/$defs/TabInfo"
+                },
+                "type": {
+                  "const": "checkout_created",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace",
+                "tab",
+                "root_pane",
+                "checkout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "already_open": {
+                  "type": "boolean"
+                },
+                "checkout": {
+                  "$ref": "#/schemas/success_response/$defs/CheckoutInfo"
+                },
+                "root_pane": {
+                  "$ref": "#/schemas/success_response/$defs/PaneInfo"
+                },
+                "tab": {
+                  "$ref": "#/schemas/success_response/$defs/TabInfo"
+                },
+                "type": {
+                  "const": "checkout_opened",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace",
+                "tab",
+                "root_pane",
+                "checkout",
+                "already_open"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "forced": {
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "checkout_removed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_id",
+                "path",
+                "forced"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "tab": {
                   "$ref": "#/schemas/success_response/$defs/TabInfo"
                 },
@@ -10381,6 +10743,22 @@
                 "type",
                 "active",
                 "projection_revision"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "interested": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "vcs_status_interest_set",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "interested"
               ],
               "type": "object"
             },

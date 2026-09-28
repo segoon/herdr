@@ -647,7 +647,7 @@ impl HeadlessServer {
                 true
             }
             AppEvent::PaneDied { pane_id, .. }
-            | AppEvent::WorktreeRuntimeRestoreFailed { pane_id, .. } => {
+            | AppEvent::CheckoutRuntimeRestoreFailed { pane_id, .. } => {
                 let focus_before = self.shell_focus_targets();
                 let focused_tabs_before = self.focused_shell_tabs();
                 let pane_id_val = *pane_id;
@@ -661,7 +661,7 @@ impl HeadlessServer {
                 if matches!(&ev, AppEvent::PaneDied { .. })
                     && !self
                         .app
-                        .pending_worktree_remove_runtime_exits
+                        .pending_checkout_remove_runtime_exits
                         .contains_key(&pane_id_val)
                 {
                     if let Some(update) = self

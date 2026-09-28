@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::agents::AgentInfo;
+use super::checkouts::{CheckoutInfo, CheckoutSourceInfo};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
@@ -80,6 +81,28 @@ pub enum ResponseResult {
         already_open: bool,
     },
     WorktreeRemoved {
+        workspace_id: String,
+        path: String,
+        forced: bool,
+    },
+    CheckoutList {
+        source: CheckoutSourceInfo,
+        checkouts: Vec<CheckoutInfo>,
+    },
+    CheckoutCreated {
+        workspace: WorkspaceInfo,
+        tab: TabInfo,
+        root_pane: PaneInfo,
+        checkout: CheckoutInfo,
+    },
+    CheckoutOpened {
+        workspace: WorkspaceInfo,
+        tab: TabInfo,
+        root_pane: PaneInfo,
+        checkout: CheckoutInfo,
+        already_open: bool,
+    },
+    CheckoutRemoved {
         workspace_id: String,
         path: String,
         forced: bool,
@@ -276,6 +299,9 @@ pub enum ResponseResult {
     ClientShellSurfaceSet {
         active: bool,
         projection_revision: u64,
+    },
+    VcsStatusInterestSet {
+        interested: bool,
     },
     Ok {},
 }

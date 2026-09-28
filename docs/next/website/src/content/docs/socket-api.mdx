@@ -102,6 +102,7 @@ Raw socket method names use dot notation:
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
+| External VCS checkout | `checkout.list`, `checkout.create`, `checkout.open`, `checkout.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
@@ -362,6 +363,24 @@ Remove a linked checkout:
 Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create`, and `worktree.open`; omit both to use the active workspace. Use exactly one of `path` or `branch` for `worktree.open`. Raw socket `cwd` and `path` values must be absolute; the CLI expands relative `--cwd` and `--path` values before sending requests. Workspace responses include optional `worktree` provenance when a workspace belongs to a Herdr worktree group. Worktree commands can emit `workspace.updated` when an existing workspace gains or changes worktree provenance.
 
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
+
+External providers use the separate `checkout.*` methods. `checkout.list`
+accepts an optional `workspace_id` or absolute `cwd`. `checkout.create` also
+accepts `name`, an optional absolute `destination`, optional `label`, and
+`focus`. `checkout.open` selects an opaque `checkout_id` returned by
+`checkout.list`; display paths are not identities. `checkout.remove` accepts a
+checkout workspace ID and optional `force`.
+
+The server rechecks provider capabilities for every request. Removal requires
+provider-managed provenance and is always executed by the provider; Herdr never
+recursively deletes an external checkout directory.
+
+Checkout mutations reserve their canonical path across both Git worktree and
+external-provider operations. A provider timeout that cannot be conclusively
+reconciled returns `checkout_outcome_unknown` and keeps that path quarantined.
+If VCS configuration changes while a request is running, stale list/open results
+return `vcs_configuration_changed`; successful create/remove results are still
+finalized because the external side effect has already happened.
 
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
 

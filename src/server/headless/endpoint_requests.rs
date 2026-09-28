@@ -55,6 +55,24 @@ impl HeadlessServer {
             );
             return changed;
         }
+        if let api::schema::Method::VcsStatusInterestSet(params) = &request.method {
+            let Some(client) = self.clients.get_mut(&client_id) else {
+                return false;
+            };
+            let changed = client.shell_vcs_status_interest != Some(params.interested);
+            client.shell_vcs_status_interest = Some(params.interested);
+            self.send_to_client(
+                client_id,
+                crate::server::client_commands::success_message_with_result(
+                    boot_id,
+                    request_id,
+                    api::schema::ResponseResult::VcsStatusInterestSet {
+                        interested: params.interested,
+                    },
+                ),
+            );
+            return changed;
+        }
         if client.shell_endpoint_command_in_flight {
             let message = crate::server::client_commands::error_message(
                 boot_id,

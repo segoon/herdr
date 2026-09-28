@@ -16,7 +16,7 @@ fn client_shell_projection(
     Box<protocol::ClientShellSnapshot>,
     protocol::endpoint::EndpointAgentCompletions,
 ) {
-    let read_control = |expected| {
+    let read_control = |expected| loop {
         let ServerMessage::EndpointControl { kind, data } = read_server_message(
             receiver
                 .recv_timeout(Duration::from_secs(1))
@@ -24,8 +24,11 @@ fn client_shell_projection(
         ) else {
             panic!("expected endpoint control {expected}");
         };
+        if kind == protocol::endpoint::VCS_PROJECTION_KIND {
+            continue;
+        }
         assert_eq!(kind, expected);
-        data
+        break data;
     };
     let completions: protocol::endpoint::EndpointAgentCompletions =
         serde_json::from_str(&read_control(protocol::endpoint::AGENT_COMPLETIONS_KIND)).unwrap();
@@ -4866,15 +4869,15 @@ fn terminal_attach_client_exits_when_worktree_runtime_restore_fails() {
     assert_eq!(server.terminal_attach_owners.get(&terminal_id), Some(&7));
     server
         .app
-        .pending_worktree_remove_runtime_exits
+        .pending_checkout_remove_runtime_exits
         .insert(pane_id, 1);
     server
         .app
-        .pending_worktree_remove_runtime_restores
+        .pending_checkout_remove_runtime_restores
         .insert(pane_id, 7);
 
     assert!(
-        server.handle_internal_event_with_forwarding(AppEvent::WorktreeRuntimeRestoreFailed {
+        server.handle_internal_event_with_forwarding(AppEvent::CheckoutRuntimeRestoreFailed {
             pane_id,
             operation_id: 7,
         })
@@ -4907,17 +4910,14 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
     server.app.state.active = Some(1);
     server.app.state.selected = 1;
     let checkout_key = crate::worktree::canonical_or_original(&checkout);
+    server.app.checkout_requests.insert_remove_for_test(
+        workspace_id.clone(),
+        checkout_key.clone(),
+        7,
+    );
     server
         .app
-        .pending_api_worktree_removes
-        .insert(workspace_id.clone(), 7);
-    server
-        .app
-        .pending_api_worktree_remove_paths
-        .insert(checkout_key.clone(), 7);
-    server
-        .app
-        .pending_worktree_remove_runtime_exits
+        .pending_checkout_remove_runtime_exits
         .insert(pane_id, 1);
     let terminal_id = terminal_id.to_string();
     let (writer, control_rx, _render_rx) = test_client_writer();
@@ -4986,7 +4986,7 @@ fn expected_worktree_runtime_exit_does_not_release_agent() {
         );
     server
         .app
-        .pending_worktree_remove_runtime_exits
+        .pending_checkout_remove_runtime_exits
         .insert(pane_id, 1);
 
     assert!(

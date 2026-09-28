@@ -575,14 +575,29 @@ impl HeadlessServer {
                     self.server_config_diagnostic_without_keybindings.clone()
                 };
                 candidate.revision = client.shell_projection_revision;
+                let vcs_projection_changed =
+                    client
+                        .shell_vcs_projection
+                        .as_ref()
+                        .is_none_or(|projection| {
+                            !crate::server::client_shell::vcs_projection_matches(
+                                &self.app, projection,
+                            )
+                        });
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
+                    || vcs_projection_changed
                     || client.shell_agent_view != agent_view
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
                     candidate.revision = client.shell_projection_revision;
                     completions.revision = candidate.revision;
+                    let vcs_projection = crate::server::client_shell::vcs_projection(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                        candidate.revision,
+                    );
                     let completion_framed =
                         match crate::protocol::endpoint::agent_completions_message(&completions)
                             .map_err(std::io::Error::other)
@@ -623,6 +638,19 @@ impl HeadlessServer {
                                 continue;
                             }
                         };
+                    let vcs_framed =
+                        match crate::protocol::endpoint::vcs_projection_message(&vcs_projection)
+                            .map_err(std::io::Error::other)
+                            .and_then(|message| {
+                                Self::frame_server_message(&message).map_err(std::io::Error::other)
+                            }) {
+                            Ok(message) => message,
+                            Err(err) => {
+                                warn!(client_id, err = %err, "failed to frame VCS projection");
+                                broken_clients.push(client_id);
+                                continue;
+                            }
+                        };
                     let projection_framed = match projection_message
                         .as_ref()
                         .map(Self::frame_server_message)
@@ -648,6 +676,7 @@ impl HeadlessServer {
                         continue;
                     };
                     if projection_framed.is_some_and(|framed| writer.control.send(framed).is_err())
+                        || writer.control.send(vcs_framed).is_err()
                         || writer.control.send(completion_framed).is_err()
                         || writer.control.send(snapshot_framed).is_err()
                     {
@@ -656,6 +685,7 @@ impl HeadlessServer {
                     }
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_completions = Some(completions);
+                    client.shell_vcs_projection = Some(vcs_projection);
                     client.shell_agent_view = agent_view;
                 }
                 shell_projection_revision = client.shell_projection_revision;

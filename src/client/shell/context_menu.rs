@@ -6,6 +6,24 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
+            ClientContextMenuTarget::ExternalWorkspace {
+                can_create,
+                can_list,
+                can_remove,
+                ..
+            } => {
+                let mut items = vec![item("Rename", Action::Rename), item("Close", Action::Close)];
+                if *can_create {
+                    items.push(item("New checkout", Action::NewCheckout));
+                }
+                if *can_list {
+                    items.push(item("Open checkout...", Action::OpenCheckout));
+                }
+                if *can_remove {
+                    items.push(item("Delete checkout...", Action::RemoveCheckout));
+                }
+                items
+            }
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -92,6 +110,34 @@ impl ClientShellState {
             return;
         };
         let worktree = workspace.worktree.as_ref();
+        let external = self
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+            .and_then(|endpoint| Self::endpoint_workspace_vcs(endpoint, &workspace_id));
+        if let Some(vcs) = external {
+            let supports = |capability: &str, method: &str| {
+                vcs.capabilities.iter().any(|value| value == capability)
+                    && self.supports_endpoint_method_name(method)
+            };
+            self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+                target: ClientContextMenuTarget::ExternalWorkspace {
+                    workspace_id,
+                    can_create: vcs.can_create_checkout
+                        && supports("checkout.create", "checkout.create"),
+                    can_list: supports("checkout.list", "checkout.list"),
+                    can_remove: vcs
+                        .checkout
+                        .as_ref()
+                        .is_some_and(|checkout| checkout.managed)
+                        && supports("checkout.remove", "checkout.remove"),
+                },
+                x,
+                y,
+                highlighted: 0,
+            }));
+            return;
+        }
         let has_worktree_children = worktree.is_some_and(|worktree| {
             !worktree.is_linked_worktree
                 && snapshot
@@ -195,6 +241,9 @@ impl ClientShellState {
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
             }
+            ClientContextMenuTarget::ExternalWorkspace { workspace_id, .. } => {
+                self.activate_workspace_context_action(workspace_id, action, outcome)
+            }
             ClientContextMenuTarget::Tab {
                 tab_id,
                 workspace_id,
@@ -268,6 +317,15 @@ impl ClientShellState {
             }
             ClientContextMenuAction::RemoveWorktree => {
                 self.begin_worktree_action_for(KeybindAction::RemoveWorktree, workspace_id, outcome)
+            }
+            ClientContextMenuAction::NewCheckout => {
+                self.open_external_checkout_create(workspace_id, outcome)
+            }
+            ClientContextMenuAction::OpenCheckout => {
+                self.begin_external_checkout_open(workspace_id, outcome)
+            }
+            ClientContextMenuAction::RemoveCheckout => {
+                self.submit_external_checkout_remove(workspace_id, outcome)
             }
             ClientContextMenuAction::ToggleGroup => {
                 let key = self.snapshot.as_deref().and_then(|snapshot| {

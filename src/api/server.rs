@@ -534,11 +534,14 @@ fn handle_request(
         });
     }
 
-    if matches!(&request.method, Method::ClientShellSurfaceSet(_)) {
+    if matches!(
+        &request.method,
+        Method::ClientShellSurfaceSet(_) | Method::VcsStatusInterestSet(_)
+    ) {
         return error_response_json(
             request.id,
             "connection_local_only",
-            "client_shell.surface.set is only available through a client shell endpoint".into(),
+            "this interest method is only available through a client shell endpoint".into(),
         );
     }
 
@@ -578,6 +581,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::ClientWindowTitleSet(_) => "client.window_title.set",
         Method::ClientWindowTitleClear(_) => "client.window_title.clear",
         Method::ClientShellSurfaceSet(_) => "client_shell.surface.set",
+        Method::VcsStatusInterestSet(_) => "vcs.status_interest.set",
         Method::SessionSnapshot(_) => "session.snapshot",
         Method::WorkspaceCreate(_) => "workspace.create",
         Method::WorkspaceList(_) => "workspace.list",
@@ -592,6 +596,10 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",
         Method::WorktreeRemove(_) => "worktree.remove",
+        Method::CheckoutList(_) => "checkout.list",
+        Method::CheckoutCreate(_) => "checkout.create",
+        Method::CheckoutOpen(_) => "checkout.open",
+        Method::CheckoutRemove(_) => "checkout.remove",
         Method::TabCreate(_) => "tab.create",
         Method::TabList(_) => "tab.list",
         Method::TabGet(_) => "tab.get",

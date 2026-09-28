@@ -35,33 +35,6 @@ impl App {
         };
         self.state.switch_workspace(parent_idx);
     }
-
-    pub(crate) fn shutdown_workspace_terminal_runtimes_for_worktree_remove(
-        &mut self,
-        ws_idx: usize,
-    ) -> Vec<crate::layout::PaneId> {
-        let mut shutdown_panes = Vec::new();
-        for pane_id in self.state.pane_ids_for_workspace(ws_idx) {
-            let Some(terminal_id) = self.state.terminal_id_for_pane(ws_idx, pane_id) else {
-                continue;
-            };
-            if self.terminal_runtimes.get(&terminal_id).is_none() {
-                continue;
-            }
-            tracing::debug!(
-                workspace_index = ws_idx,
-                terminal_id = %terminal_id,
-                "shutting down terminal runtime before worktree removal"
-            );
-            *self
-                .pending_worktree_remove_runtime_exits
-                .entry(pane_id)
-                .or_default() += 1;
-            shutdown_panes.push(pane_id);
-            self.shutdown_terminal_runtime(terminal_id);
-        }
-        shutdown_panes
-    }
 }
 
 #[cfg(test)]

@@ -267,6 +267,108 @@ pub(super) fn snapshot_with_completions(
     (shell, completions)
 }
 
+pub(super) fn vcs_projection(
+    app: &app::App,
+    boot_id: &str,
+    revision: u64,
+) -> protocol::endpoint::EndpointVcsProjection {
+    let workspaces = app
+        .state
+        .workspaces
+        .iter()
+        .filter_map(|workspace| {
+            let vcs = workspace.cached_external_vcs.as_ref()?;
+            Some((
+                workspace.id.clone(),
+                protocol::endpoint::EndpointWorkspaceVcs {
+                    provider_id: vcs.provider_id.clone(),
+                    provider_display_name: vcs.provider_display_name.clone(),
+                    repository_key: vcs.repository_key.clone(),
+                    branch: vcs.branch.clone(),
+                    ahead: vcs.ahead,
+                    behind: vcs.behind,
+                    capabilities: vcs
+                        .capabilities
+                        .iter()
+                        .map(|capability| capability.as_str().to_owned())
+                        .collect(),
+                    can_create_checkout: vcs.checkout_directory.is_some()
+                        && vcs
+                            .capabilities
+                            .contains(&crate::vcs::Capability::CheckoutCreate),
+                    checkout: workspace.checkout_space.as_ref().map(|checkout| {
+                        protocol::endpoint::EndpointWorkspaceCheckout {
+                            id: checkout.checkout_id.clone(),
+                            name: checkout.checkout_name.clone(),
+                            path: Some(checkout.checkout_path.display().to_string()),
+                            managed: checkout.managed,
+                            is_source: checkout.source_workspace_id.is_none(),
+                        }
+                    }),
+                },
+            ))
+        })
+        .collect();
+    protocol::endpoint::EndpointVcsProjection {
+        boot_id: boot_id.to_owned(),
+        revision,
+        workspaces,
+    }
+}
+
+/// Compares the app's current VCS projection without allocating a replacement.
+/// The render loop uses this narrow check to keep projection construction off
+/// unchanged client frames.
+pub(super) fn vcs_projection_matches(
+    app: &app::App,
+    projection: &protocol::endpoint::EndpointVcsProjection,
+) -> bool {
+    let mut projected = 0;
+    for workspace in &app.state.workspaces {
+        let Some(vcs) = workspace.cached_external_vcs.as_ref() else {
+            continue;
+        };
+        projected += 1;
+        let Some(current) = projection.workspaces.get(&workspace.id) else {
+            return false;
+        };
+        let checkout_matches = match (&current.checkout, &workspace.checkout_space) {
+            (None, None) => true,
+            (Some(current), Some(checkout)) => {
+                current.id == checkout.checkout_id
+                    && current.name == checkout.checkout_name
+                    && current.path.as_deref()
+                        == Some(checkout.checkout_path.to_string_lossy().as_ref())
+                    && current.managed == checkout.managed
+                    && current.is_source == checkout.source_workspace_id.is_none()
+            }
+            _ => false,
+        };
+        if current.provider_id != vcs.provider_id
+            || current.provider_display_name != vcs.provider_display_name
+            || current.repository_key != vcs.repository_key
+            || current.branch != vcs.branch
+            || current.ahead != vcs.ahead
+            || current.behind != vcs.behind
+            || current.can_create_checkout
+                != (vcs.checkout_directory.is_some()
+                    && vcs
+                        .capabilities
+                        .contains(&crate::vcs::Capability::CheckoutCreate))
+            || current.capabilities.len() != vcs.capabilities.len()
+            || !current
+                .capabilities
+                .iter()
+                .zip(vcs.capabilities.iter())
+                .all(|(current, capability)| current == capability.as_str())
+            || !checkout_matches
+        {
+            return false;
+        }
+    }
+    projected == projection.workspaces.len()
+}
+
 pub(super) struct RenderedPaneSurface {
     pub(super) frame: FrameData,
     pub(super) panes: Vec<protocol::PaneSurfacePane>,
@@ -629,16 +731,46 @@ fn split_hit_rect(
 mod tests {
     use super::*;
 
-    #[test]
-    fn snapshot_projects_cached_release_and_update_facts() {
+    fn test_app() -> crate::app::App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = crate::app::App::new(
+        crate::app::App::new(
             &crate::config::Config::default(),
             crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
-        );
+        )
+    }
+
+    #[test]
+    fn vcs_projection_match_detects_state_changes_without_rebuilding() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("workspace")];
+        app.state.workspaces[0].cached_external_vcs = Some(crate::workspace::ExternalVcsState {
+            provider_id: "arc".into(),
+            provider_display_name: "Arc".into(),
+            repository_root: "/repo".into(),
+            repository_key: "arc:repo".into(),
+            capabilities: [crate::vcs::Capability::Inspect].into_iter().collect(),
+            checkout_directory: None,
+            branch: Some("main".into()),
+            ahead: Some(1),
+            behind: None,
+        });
+        let projection = vcs_projection(&app, "boot", 7);
+
+        assert!(vcs_projection_matches(&app, &projection));
+        app.state.workspaces[0]
+            .cached_external_vcs
+            .as_mut()
+            .expect("external VCS state")
+            .branch = Some("topic".into());
+        assert!(!vcs_projection_matches(&app, &projection));
+    }
+
+    #[test]
+    fn snapshot_projects_cached_release_and_update_facts() {
+        let mut app = test_app();
         app.state.integration_recommendations.clear();
         app.state.update_available = Some("0.8.3".into());
         app.state.update_install_command = "herdr update".into();
@@ -667,14 +799,7 @@ mod tests {
 
     #[test]
     fn snapshot_badges_only_outdated_integrations() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = crate::app::App::new(
-            &crate::config::Config::default(),
-            crate::app::AppPolicy::TEST,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
+        let mut app = test_app();
         app.state.integration_recommendations =
             vec![crate::integration::IntegrationRecommendation {
                 target: crate::api::schema::IntegrationTarget::Claude,

@@ -1377,7 +1377,7 @@ impl AppState {
                 self.handle_pane_died(pane_id);
                 Vec::new()
             }
-            AppEvent::WorktreeRuntimeRestoreFailed { .. } => Vec::new(),
+            AppEvent::CheckoutRuntimeRestoreFailed { .. } => Vec::new(),
             AppEvent::UpdateReady {
                 version,
                 install_command,
@@ -1606,6 +1606,10 @@ impl AppState {
             } => {
                 let _ = results;
                 let _ = cache_updates;
+                Vec::new()
+            }
+            AppEvent::ExternalVcsRefreshed { .. } => Vec::new(),
+            AppEvent::ExternalCheckoutFinished(_) | AppEvent::ExternalCheckoutRemovePrepared(_) => {
                 Vec::new()
             }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),

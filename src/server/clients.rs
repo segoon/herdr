@@ -161,6 +161,8 @@ pub(crate) struct ClientConnection {
     pub(crate) render_pending: bool,
     /// Whether this connection receives pane surfaces and may affect presentation state.
     pub(crate) shell_surface_active: bool,
+    /// `None` preserves status refreshes for clients predating explicit interest negotiation.
+    pub(crate) shell_vcs_status_interest: Option<bool>,
     /// Whether this shell wants host mouse capture without pane demand.
     pub(crate) shell_mouse_capture: bool,
     /// Last host mouse capture mode sent to this client.
@@ -178,6 +180,7 @@ pub(crate) struct ClientConnection {
     /// Last coherent shell replacement sent to this client.
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
     pub(crate) shell_agent_completions: Option<crate::protocol::endpoint::EndpointAgentCompletions>,
+    pub(crate) shell_vcs_projection: Option<crate::protocol::endpoint::EndpointVcsProjection>,
     /// View policy paired with the last coherent shell replacement.
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
     /// Monotonic shell replacement revision for this connection.
@@ -239,6 +242,7 @@ impl ClientConnection {
             host_keyboard_report_all_active: None,
             render_pending: false,
             shell_surface_active: true,
+            shell_vcs_status_interest: None,
             shell_mouse_capture: false,
             host_mouse_capture_active: None,
             host_sgr_pixels_active: None,
@@ -248,6 +252,7 @@ impl ClientConnection {
             shell_location: None,
             shell_snapshot: None,
             shell_agent_completions: None,
+            shell_vcs_projection: None,
             shell_agent_view: None,
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,

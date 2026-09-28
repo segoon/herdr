@@ -22,6 +22,65 @@ fn retain_detached_process_after_wait(
 }
 
 impl App {
+    pub(crate) fn respawn_shell_for_launch_pane(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        focus_pane: bool,
+    ) -> bool {
+        let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
+            return false;
+        };
+        let terminal_id = pane_state.attached_terminal_id.clone();
+        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
+            return false;
+        };
+
+        let cwd = terminal.cwd.clone();
+        let (rows, cols) = self
+            .terminal_runtimes
+            .get(&terminal_id)
+            .map(|runtime| runtime.current_size())
+            .unwrap_or_else(|| self.state.estimate_pane_size());
+        let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
+            return false;
+        };
+        let runtime = match crate::terminal::TerminalRuntime::spawn(
+            pane_id,
+            rows,
+            cols,
+            cwd,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+            self.state.host_terminal_appearance,
+            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
+            &launch_env,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::warn!(
+                    pane = pane_id.raw(),
+                    terminal = %terminal_id,
+                    err = %err,
+                    "failed to respawn shell after launch command exited"
+                );
+                return false;
+            }
+        };
+
+        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
+        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+            terminal.clear_agent_runtime_identity_after_respawn();
+        }
+        if focus_pane {
+            self.state.focus_pane_in_workspace(ws_idx, pane_id);
+        }
+        self.schedule_session_save();
+        true
+    }
+
     pub(crate) fn reap_finished_detached_processes(&mut self) {
         self.detached_process_children
             .retain_mut(|child| retain_detached_process_after_wait(child.id(), child.try_wait()));

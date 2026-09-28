@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+pub(super) mod checkout_requests;
+mod checkouts;
 mod env;
 mod integrations;
 mod layouts;
@@ -26,13 +28,59 @@ enum RuntimeExitAction {
     ClosePane,
 }
 
+pub(super) struct CheckoutWorkspaceRecords {
+    pub(super) workspace: crate::api::schema::WorkspaceInfo,
+    pub(super) tab: crate::api::schema::TabInfo,
+    pub(super) root_pane: crate::api::schema::PaneInfo,
+}
+
 impl App {
+    pub(super) fn checkout_workspace_records(&self, ws_idx: usize) -> CheckoutWorkspaceRecords {
+        let workspace = self.workspace_info(ws_idx);
+        let tab_idx = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .expect("checkout workspace should exist")
+            .active_tab;
+        CheckoutWorkspaceRecords {
+            workspace,
+            tab: self
+                .tab_info(ws_idx, tab_idx)
+                .expect("checkout workspace should have an active tab"),
+            root_pane: self
+                .root_pane_info(ws_idx, tab_idx)
+                .expect("checkout workspace should have an active root pane"),
+        }
+    }
+
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
             } => self.handle_git_status_refreshed(results, cache_updates),
+            AppEvent::ExternalVcsRefreshed {
+                generation,
+                task_id,
+                results,
+                activations,
+                failures,
+            } => self.handle_external_vcs_refreshed(
+                generation,
+                task_id,
+                results,
+                activations,
+                failures,
+            ),
+            AppEvent::ExternalCheckoutFinished(result) => {
+                self.handle_external_checkout_finished(*result);
+                true
+            }
+            AppEvent::ExternalCheckoutRemovePrepared(prepared) => {
+                self.handle_external_checkout_remove_prepared(*prepared);
+                true
+            }
             AppEvent::TabBarCommandFinished {
                 generation,
                 segment_index,
@@ -82,6 +130,79 @@ impl App {
         changed
     }
 
+    fn handle_external_vcs_refreshed(
+        &mut self,
+        generation: u64,
+        task_id: u64,
+        results: Vec<crate::events::ExternalVcsRefreshResult>,
+        activations: Vec<crate::vcs::ActivatedProvider>,
+        failures: Vec<crate::events::ExternalVcsFailure>,
+    ) -> bool {
+        if self.external_vcs_refresh_in_flight != Some(task_id) {
+            return false;
+        }
+        self.external_vcs_refresh_in_flight = None;
+        if generation != self.vcs_registry.generation() {
+            return false;
+        }
+        for provider in activations {
+            self.external_vcs_retry_after.remove(provider.id());
+            self.activated_vcs_providers
+                .insert(provider.id().to_owned(), provider);
+        }
+        let failed_providers = failures
+            .iter()
+            .map(|failure| failure.provider_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for failure in &failures {
+            tracing::warn!(
+                provider = %failure.provider_id,
+                stage = ?failure.stage,
+                retryable = failure.retryable,
+                error = %failure.message,
+                "external VCS refresh failed"
+            );
+        }
+        let retry_at = Instant::now() + Duration::from_secs(30);
+        for provider_id in &failed_providers {
+            self.external_vcs_retry_after
+                .insert(provider_id.clone(), retry_at);
+        }
+        let mut by_workspace = results
+            .into_iter()
+            .map(|result| (result.workspace_id.clone(), result))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut changed = false;
+        for workspace in &mut self.state.workspaces {
+            let next = by_workspace.remove(&workspace.id).and_then(|result| {
+                (workspace
+                    .resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)
+                    == Some(result.resolved_identity_cwd))
+                .then_some(result.observation)
+            });
+            let next = match next {
+                Some(crate::events::ExternalVcsObservation::Present(state)) => Some(state),
+                Some(crate::events::ExternalVcsObservation::Absent) => None,
+                Some(crate::events::ExternalVcsObservation::Unavailable { provider_id }) => {
+                    debug_assert!(failed_providers.contains(&provider_id));
+                    workspace.cached_external_vcs.clone()
+                }
+                Some(crate::events::ExternalVcsObservation::NotExamined) | None => {
+                    workspace.cached_external_vcs.clone()
+                }
+            };
+            if workspace.cached_external_vcs != next {
+                workspace.cached_external_vcs = next;
+                changed = true;
+            }
+        }
+        if changed {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changed
+    }
+
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) {
         let _ = self.handle_internal_event_with_pane_updates(ev);
     }
@@ -92,11 +213,11 @@ impl App {
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
         let mut worktree_restore_failed = false;
         let ev = match ev {
-            AppEvent::WorktreeRuntimeRestoreFailed {
+            AppEvent::CheckoutRuntimeRestoreFailed {
                 pane_id,
                 operation_id,
             } => {
-                if !self.claim_worktree_runtime_restore_failure(pane_id, operation_id) {
+                if !self.claim_checkout_runtime_restore_failure(pane_id, operation_id) {
                     return Vec::new();
                 }
                 worktree_restore_failed = true;
@@ -120,6 +241,28 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(results, cache_updates);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalVcsRefreshed {
+            generation,
+            task_id,
+            results,
+            activations,
+            failures,
+        } = ev
+        {
+            self.handle_external_vcs_refreshed(generation, task_id, results, activations, failures);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalCheckoutFinished(result) = ev {
+            self.handle_external_checkout_finished(*result);
+            return Vec::new();
+        }
+
+        if let AppEvent::ExternalCheckoutRemovePrepared(prepared) = ev {
+            self.handle_external_checkout_remove_prepared(*prepared);
             return Vec::new();
         }
 
@@ -191,10 +334,10 @@ impl App {
             }
             if worktree_restore_failed {
                 worktree_restore_updates
-                    .extend(self.publish_worktree_runtime_agent_release(*pane_id));
+                    .extend(self.publish_checkout_runtime_agent_release(*pane_id));
             } else {
                 let expected_exit = self
-                    .pending_worktree_remove_runtime_exits
+                    .pending_checkout_remove_runtime_exits
                     .get_mut(pane_id)
                     .map(|remaining| {
                         *remaining -= 1;
@@ -202,14 +345,14 @@ impl App {
                     });
                 if let Some(remove_entry) = expected_exit {
                     let restore_failed = if remove_entry {
-                        self.pending_worktree_remove_runtime_exits.remove(pane_id);
+                        self.pending_checkout_remove_runtime_exits.remove(pane_id);
                         let restore_requested = self
-                            .pending_worktree_remove_runtime_restores
+                            .pending_checkout_remove_runtime_restores
                             .remove(pane_id)
                             .is_some();
                         if restore_requested {
                             worktree_restore_updates
-                                .extend(self.publish_worktree_runtime_agent_release(*pane_id));
+                                .extend(self.publish_checkout_runtime_agent_release(*pane_id));
                         }
                         restore_requested && !self.respawn_shell_for_launch_pane(*pane_id, false)
                     } else {
@@ -547,80 +690,21 @@ impl App {
         }
     }
 
-    fn respawn_shell_for_launch_pane(
-        &mut self,
-        pane_id: crate::layout::PaneId,
-        focus_pane: bool,
-    ) -> bool {
-        let Some((ws_idx, pane_state)) = self.find_pane(pane_id) else {
-            return false;
-        };
-        let terminal_id = pane_state.attached_terminal_id.clone();
-        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
-            return false;
-        };
-
-        let cwd = terminal.cwd.clone();
-        let (rows, cols) = self
-            .terminal_runtimes
-            .get(&terminal_id)
-            .map(|runtime| runtime.current_size())
-            .unwrap_or_else(|| self.state.estimate_pane_size());
-        let Some(launch_env) = self.pane_launch_env(ws_idx, pane_id, Vec::new()) else {
-            return false;
-        };
-        let runtime = match crate::terminal::TerminalRuntime::spawn(
-            pane_id,
-            rows,
-            cols,
-            cwd,
-            self.state.pane_scrollback_limit_bytes,
-            self.state.host_terminal_theme,
-            self.state.host_terminal_appearance,
-            crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
-            &launch_env,
-            self.event_tx.clone(),
-            self.render_notify.clone(),
-            self.render_dirty.clone(),
-        ) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                tracing::warn!(
-                    pane = pane_id.raw(),
-                    terminal = %terminal_id,
-                    err = %err,
-                    "failed to respawn shell after launch command exited"
-                );
-                return false;
-            }
-        };
-
-        self.terminal_runtimes.insert(terminal_id.clone(), runtime);
-        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-            terminal.clear_agent_runtime_identity_after_respawn();
-        }
-        if focus_pane {
-            self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        }
-        self.schedule_session_save();
-        true
-    }
-
-    pub(crate) fn claim_worktree_runtime_restore_failure(
+    pub(crate) fn claim_checkout_runtime_restore_failure(
         &mut self,
         pane_id: crate::layout::PaneId,
         operation_id: u64,
     ) -> bool {
-        if self.pending_worktree_remove_runtime_restores.get(&pane_id) != Some(&operation_id) {
+        if self.pending_checkout_remove_runtime_restores.get(&pane_id) != Some(&operation_id) {
             return false;
         }
-        self.pending_worktree_remove_runtime_restores
+        self.pending_checkout_remove_runtime_restores
             .remove(&pane_id);
-        self.pending_worktree_remove_runtime_exits.remove(&pane_id);
+        self.pending_checkout_remove_runtime_exits.remove(&pane_id);
         true
     }
 
-    pub(crate) fn publish_worktree_runtime_agent_release(
+    pub(crate) fn publish_checkout_runtime_agent_release(
         &mut self,
         pane_id: crate::layout::PaneId,
     ) -> Option<crate::app::actions::PaneStateUpdate> {
@@ -633,22 +717,6 @@ impl App {
         self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
         self.emit_pane_state_update(&update);
         Some(update)
-    }
-
-    fn queue_worktree_runtime_restore_failed(
-        &self,
-        pane_id: crate::layout::PaneId,
-        operation_id: u64,
-    ) {
-        let event_tx = self.event_tx.clone();
-        tokio::spawn(async move {
-            let _ = event_tx
-                .send(AppEvent::WorktreeRuntimeRestoreFailed {
-                    pane_id,
-                    operation_id,
-                })
-                .await;
-        });
     }
 
     pub(crate) fn emit_pane_state_update(&mut self, update: &crate::app::actions::PaneStateUpdate) {
@@ -1070,6 +1138,16 @@ impl App {
                     "worktree.remove is handled asynchronously by the app runtime",
                 );
             }
+            Method::CheckoutList(_)
+            | Method::CheckoutCreate(_)
+            | Method::CheckoutOpen(_)
+            | Method::CheckoutRemove(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "checkout operation is handled asynchronously by the app runtime",
+                );
+            }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),
@@ -1369,6 +1447,17 @@ pub(super) mod test_support {
 mod tests {
     use super::*;
     use crate::detect::{Agent, AgentState};
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
 
     #[cfg(unix)]
     fn init_repo(path: &std::path::Path) {
@@ -2374,29 +2463,29 @@ mod tests {
                 RuntimeExitAction::RespawnShell
             );
         }
-        app.pending_worktree_remove_runtime_exits.insert(pane_id, 1);
-        app.pending_worktree_remove_runtime_restores
+        app.pending_checkout_remove_runtime_exits.insert(pane_id, 1);
+        app.pending_checkout_remove_runtime_restores
             .insert(pane_id, 8);
 
-        app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
+        app.handle_internal_event(AppEvent::CheckoutRuntimeRestoreFailed {
             pane_id,
             operation_id: 7,
         });
         assert_eq!(
-            app.pending_worktree_remove_runtime_restores.get(&pane_id),
+            app.pending_checkout_remove_runtime_restores.get(&pane_id),
             Some(&8)
         );
         assert!(app.event_rx.try_recv().is_err());
 
-        app.handle_internal_event(AppEvent::WorktreeRuntimeRestoreFailed {
+        app.handle_internal_event(AppEvent::CheckoutRuntimeRestoreFailed {
             pane_id,
             operation_id: 8,
         });
 
         assert!(app.find_pane(pane_id).is_none());
         assert!(app.terminal_runtimes.get(&terminal_id).is_none());
-        assert!(app.pending_worktree_remove_runtime_exits.is_empty());
-        assert!(app.pending_worktree_remove_runtime_restores.is_empty());
+        assert!(app.pending_checkout_remove_runtime_exits.is_empty());
+        assert!(app.pending_checkout_remove_runtime_restores.is_empty());
     }
 
     #[test]
@@ -2457,5 +2546,63 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+
+    #[test]
+    fn external_vcs_refresh_distinguishes_unavailable_from_absent() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("workspace")];
+        app.state.ensure_test_terminals();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let cwd = app.state.workspaces[0]
+            .resolved_identity_cwd_from(&app.state.terminals, &app.terminal_runtimes)
+            .unwrap_or_else(|| app.state.workspaces[0].identity_cwd.clone());
+        let cached = crate::workspace::ExternalVcsState {
+            provider_id: "arc".into(),
+            provider_display_name: "Arc".into(),
+            repository_root: cwd.clone(),
+            repository_key: "arc:repo".into(),
+            capabilities: std::collections::BTreeSet::new(),
+            checkout_directory: None,
+            branch: Some("main".into()),
+            ahead: None,
+            behind: None,
+        };
+        app.state.workspaces[0].cached_external_vcs = Some(cached.clone());
+        app.external_vcs_refresh_in_flight = Some(7);
+
+        app.handle_external_vcs_refreshed(
+            app.vcs_registry.generation(),
+            7,
+            vec![crate::events::ExternalVcsRefreshResult {
+                workspace_id: workspace_id.clone(),
+                resolved_identity_cwd: cwd.clone(),
+                observation: crate::events::ExternalVcsObservation::Unavailable {
+                    provider_id: "arc".into(),
+                },
+            }],
+            Vec::new(),
+            vec![crate::events::ExternalVcsFailure {
+                provider_id: "arc".into(),
+                stage: crate::events::ExternalVcsFailureStage::Inspect,
+                retryable: true,
+                message: "temporary".into(),
+            }],
+        );
+        assert_eq!(app.state.workspaces[0].cached_external_vcs, Some(cached));
+
+        app.external_vcs_refresh_in_flight = Some(8);
+        app.handle_external_vcs_refreshed(
+            app.vcs_registry.generation(),
+            8,
+            vec![crate::events::ExternalVcsRefreshResult {
+                workspace_id,
+                resolved_identity_cwd: cwd,
+                observation: crate::events::ExternalVcsObservation::Absent,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(app.state.workspaces[0].cached_external_vcs.is_none());
     }
 }

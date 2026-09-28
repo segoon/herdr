@@ -4,6 +4,7 @@ use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorktreeInfo, WorktreeOpenParams,
     WorktreeSourceInfo,
 };
+use crate::app::vcs_workspace::CheckoutWorkspaceCandidate;
 use crate::app::App;
 
 use super::responses::{encode_error, encode_success};
@@ -98,70 +99,76 @@ impl App {
                 Ok(created) => created,
                 Err(err) => return encode_error(id, err.code, err.message),
             };
-        let (ws_idx, created_workspace) = if let Some(ws_idx) = already_open {
-            if params.focus {
-                self.state.switch_workspace(ws_idx);
-            }
-            (ws_idx, false)
+        let candidate = if let Some(ws_idx) = already_open {
+            Some(CheckoutWorkspaceCandidate {
+                index: ws_idx,
+                created: false,
+            })
         } else if target_is_source {
-            let ws_idx = source
-                .workspace_idx
-                .expect("source workspace should exist after membership ensure");
-            if params.focus {
-                self.state.switch_workspace(ws_idx);
-            }
-            (ws_idx, created_source_workspace)
+            Some(CheckoutWorkspaceCandidate {
+                index: source
+                    .workspace_idx
+                    .expect("source workspace should exist after membership ensure"),
+                created: created_source_workspace,
+            })
         } else {
-            match self.create_workspace_with_options(entry.path.clone(), params.focus) {
-                Ok(ws_idx) => (ws_idx, true),
-                Err(err) => return encode_error(id, "worktree_open_failed", err.to_string()),
-            }
+            None
         };
+        let opened =
+            match self.open_or_create_checkout_workspace(&entry.path, candidate, params.focus) {
+                Ok(opened) => opened,
+                Err(err) => return encode_error(id, "worktree_open_failed", err),
+            };
         self.mark_worktree_membership(
             &source,
-            ws_idx,
+            opened.index,
             entry.path.clone(),
             canonical_path != crate::worktree::canonical_or_original(&source.source_repo_root),
-            !created_workspace,
+            !opened.created,
         );
-        if let Some(label) = params.label {
-            let workspace_id = self.public_workspace_id(ws_idx);
-            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
-                ws.set_custom_name(label.clone());
-                crate::logging::workspace_renamed(&ws.id);
-            }
-            if !created_workspace {
-                self.emit_event(EventEnvelope {
-                    event: EventKind::WorkspaceRenamed,
-                    data: EventData::WorkspaceRenamed {
-                        workspace_id,
-                        label,
-                    },
-                });
-            }
-        }
-        self.state.mark_session_dirty();
-        if created_workspace {
-            self.emit_workspace_open_events(ws_idx);
-        }
+        self.set_worktree_workspace_label(opened.index, params.label, !opened.created);
+        self.finalize_checkout_workspace_open(opened);
 
-        let tab_idx = self.state.workspaces[ws_idx].active_tab;
         let worktree = self.worktree_info_for_entry(&source, entry);
-        self.emit_worktree_opened_event(ws_idx, worktree.clone(), already_open.is_some());
+        self.emit_worktree_opened_event(opened.index, worktree.clone(), already_open.is_some());
+        let records = self.checkout_workspace_records(opened.index);
         encode_success(
             id,
             ResponseResult::WorktreeOpened {
-                workspace: self.workspace_info(ws_idx),
-                tab: self
-                    .tab_info(ws_idx, tab_idx)
-                    .expect("opened worktree workspace should have an active tab"),
-                root_pane: self
-                    .root_pane_info(ws_idx, tab_idx)
-                    .expect("opened worktree workspace should have an active root pane"),
+                workspace: records.workspace,
+                tab: records.tab,
+                root_pane: records.root_pane,
                 worktree,
                 already_open: already_open.is_some(),
             },
         )
+    }
+
+    fn set_worktree_workspace_label(
+        &mut self,
+        ws_idx: usize,
+        label: Option<String>,
+        notify_existing: bool,
+    ) {
+        let Some(label) = label else {
+            return;
+        };
+        let workspace_id = self.public_workspace_id(ws_idx);
+        if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
+            workspace.set_custom_name(label.clone());
+            if notify_existing {
+                crate::logging::workspace_renamed(&workspace.id);
+            }
+        }
+        if notify_existing {
+            self.emit_event(EventEnvelope {
+                event: EventKind::WorkspaceRenamed,
+                data: EventData::WorkspaceRenamed {
+                    workspace_id,
+                    label,
+                },
+            });
+        }
     }
 
     fn resolve_worktree_source(
@@ -937,7 +944,7 @@ mod tests {
             String::from_utf8(branch_name.stdout).unwrap().trim(),
             branch
         );
-        assert!(app.pending_api_worktree_creates.is_empty());
+        assert!(app.checkout_requests.is_empty());
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -986,7 +993,7 @@ mod tests {
             .expect("failed create should respond");
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "worktree_create_failed");
-        assert!(app.pending_api_worktree_creates.is_empty());
+        assert!(app.checkout_requests.is_empty());
 
         let (second_tx, second_rx) = response_channel();
         assert!(app.handle_deferred_worktree_api_request(request(), second_tx, false));
@@ -1016,8 +1023,8 @@ mod tests {
         source.identity_cwd = repo.clone();
         let source_id = source.id.clone();
         app.state.workspaces = vec![source];
-        app.pending_api_worktree_creates
-            .insert(checkout_key.clone(), 9);
+        app.checkout_requests
+            .insert_create_for_test(checkout_key.clone(), 9);
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "other-key".into(),
             label: "other".into(),
@@ -2324,8 +2331,11 @@ mod tests {
         let repo = create_committed_repo("api-worktree-create-remove-in-flight-repo");
         let checkout = unique_temp_path("api-worktree-create-remove-in-flight-checkout");
         let mut app = test_app();
-        app.pending_api_worktree_remove_paths
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests.insert_remove_for_test(
+            "removing-workspace".into(),
+            crate::worktree::canonical_or_original(&checkout),
+            7,
+        );
         let (respond_to, response_rx) = response_channel();
 
         assert!(app.handle_deferred_worktree_api_request(
@@ -2385,8 +2395,8 @@ mod tests {
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
         app.state.ensure_test_terminals();
-        app.pending_api_worktree_creates
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests
+            .insert_create_for_test(crate::worktree::canonical_or_original(&checkout), 7);
         let (respond_to, response_rx) = response_channel();
 
         assert!(app.handle_deferred_worktree_api_request(
@@ -2459,14 +2469,12 @@ mod tests {
         let (runtime, _input_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.terminal_runtimes.insert(terminal_id.clone(), runtime);
 
-        let shutdown_panes = app.shutdown_workspace_terminal_runtimes_for_worktree_remove(0);
+        let shutdown_panes = app.shutdown_workspace_terminal_runtimes_for_checkout_remove(0);
         assert_eq!(shutdown_panes, vec![pane_id]);
 
         let checkout_key = crate::worktree::canonical_or_original(&checkout);
-        app.pending_api_worktree_removes
-            .insert(workspace_id.clone(), 7);
-        app.pending_api_worktree_remove_paths
-            .insert(checkout_key.clone(), 7);
+        app.checkout_requests
+            .insert_remove_for_test(workspace_id.clone(), checkout_key.clone(), 7);
         let workspace_snapshot = app.workspace_info(0);
         let worktree_snapshot = app
             .worktree_info_for_membership(app.state.workspaces[0].worktree_space().unwrap(), None);
@@ -2496,7 +2504,7 @@ mod tests {
         assert!(app.find_pane(pane_id).is_some());
         assert!(app.terminal_runtimes.get(&terminal_id).is_none());
         assert!(app
-            .pending_worktree_remove_runtime_restores
+            .pending_checkout_remove_runtime_restores
             .contains_key(&pane_id));
 
         let pane_updates = app.handle_internal_event_with_pane_updates(AppEvent::PaneDied {
@@ -2507,8 +2515,8 @@ mod tests {
             pane_updates.as_slice(),
             [update] if update.agent_released && update.suppress_completion
         ));
-        assert!(app.pending_worktree_remove_runtime_exits.is_empty());
-        assert!(app.pending_worktree_remove_runtime_restores.is_empty());
+        assert!(app.pending_checkout_remove_runtime_exits.is_empty());
+        assert!(app.pending_checkout_remove_runtime_restores.is_empty());
         assert!(app.state.pending_agent_notifications.is_empty());
         assert!(app.terminal_runtimes.get(&terminal_id).is_some());
         assert_eq!(
@@ -2547,15 +2555,17 @@ mod tests {
         app.state.workspaces = vec![parent, child, foreground];
         app.state.active = Some(2);
         app.state.selected = 2;
-        app.pending_worktree_remove_runtime_exits
+        app.pending_checkout_remove_runtime_exits
             .insert(child_pane_id, 1);
-        app.pending_worktree_remove_runtime_restores
+        app.pending_checkout_remove_runtime_restores
             .insert(child_pane_id, 7);
         let workspace_snapshot = app.workspace_info(1);
         let worktree_snapshot = app.worktree_info_for_membership(&membership, None);
-        app.pending_api_worktree_removes.insert(child_id.clone(), 7);
-        app.pending_api_worktree_remove_paths
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
+        app.checkout_requests.insert_remove_for_test(
+            child_id.clone(),
+            crate::worktree::canonical_or_original(&checkout),
+            7,
+        );
         let (respond_to, response_rx) = response_channel();
 
         let _ = app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
@@ -2588,8 +2598,8 @@ mod tests {
             Some(&foreground_id)
         );
         assert_eq!(app.state.workspaces[app.state.selected].id, foreground_id);
-        assert!(app.pending_worktree_remove_runtime_exits.is_empty());
-        assert!(app.pending_worktree_remove_runtime_restores.is_empty());
+        assert!(app.pending_checkout_remove_runtime_exits.is_empty());
+        assert!(app.pending_checkout_remove_runtime_restores.is_empty());
     }
 
     #[tokio::test]
@@ -2614,10 +2624,12 @@ mod tests {
         let workspace_snapshot = app.workspace_info(0);
         let worktree_snapshot = app
             .worktree_info_for_membership(app.state.workspaces[0].worktree_space().unwrap(), None);
-        app.pending_api_worktree_removes.insert(child_id.clone(), 7);
-        app.pending_api_worktree_remove_paths
-            .insert(crate::worktree::canonical_or_original(&checkout), 7);
-        app.pending_worktree_remove_runtime_exits
+        app.checkout_requests.insert_remove_for_test(
+            child_id.clone(),
+            crate::worktree::canonical_or_original(&checkout),
+            7,
+        );
+        app.pending_checkout_remove_runtime_exits
             .insert(child_pane_id, 1);
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),

@@ -1824,6 +1824,9 @@ async fn run_client_loop(
                         if request_id.starts_with("client-shell-surface:") {
                             continue;
                         }
+                        if request_id.starts_with("vcs-status-interest:") {
+                            continue;
+                        }
                         let completed = endpoint_commands
                             .receive_chunk(
                                 &endpoint_id,
@@ -2030,6 +2033,16 @@ async fn run_client_loop(
                             Ok(endpoint::EndpointControlMessage::AgentCompletions(projection)) => {
                                 if let Some(shell) = state.shell.as_mut() {
                                     shell.set_endpoint_agent_completions(
+                                        &endpoint_id,
+                                        generation,
+                                        projection,
+                                    );
+                                }
+                                continue;
+                            }
+                            Ok(endpoint::EndpointControlMessage::VcsProjection(projection)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    shell.set_endpoint_vcs_projection(
                                         &endpoint_id,
                                         generation,
                                         projection,

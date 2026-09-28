@@ -10,6 +10,114 @@ use crate::layout::PaneId;
 use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
 
 #[derive(Debug)]
+pub(crate) struct ExternalVcsRefreshResult {
+    pub(crate) workspace_id: String,
+    pub(crate) resolved_identity_cwd: std::path::PathBuf,
+    pub(crate) observation: ExternalVcsObservation,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExternalVcsObservation {
+    Present(crate::workspace::ExternalVcsState),
+    Absent,
+    Unavailable { provider_id: String },
+    NotExamined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalVcsFailureStage {
+    Activate,
+    Inspect,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalVcsFailure {
+    pub(crate) provider_id: String,
+    pub(crate) stage: ExternalVcsFailureStage,
+    pub(crate) retryable: bool,
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalCheckoutSource {
+    pub(crate) provider_id: String,
+    pub(crate) provider_name: String,
+    pub(crate) repository_root: std::path::PathBuf,
+    pub(crate) repository_key: String,
+    pub(crate) source_workspace_id: Option<String>,
+    pub(crate) source_cwd: std::path::PathBuf,
+    pub(crate) capabilities: std::collections::BTreeSet<crate::vcs::Capability>,
+    pub(crate) source_checkout: Option<crate::vcs::Checkout>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExternalCheckoutOutcome {
+    Listed(Vec<crate::vcs::Checkout>),
+    Opened {
+        checkout: crate::vcs::Checkout,
+        label: Option<String>,
+        focus: bool,
+    },
+    Created {
+        checkout: crate::vcs::Checkout,
+        label: Option<String>,
+        focus: bool,
+    },
+    Removed {
+        workspace_id: String,
+        path: std::path::PathBuf,
+        force: bool,
+        shutdown_panes: Vec<crate::layout::PaneId>,
+        operation_id: u64,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalCheckoutResult {
+    pub(crate) id: String,
+    pub(crate) source: ExternalCheckoutSource,
+    pub(crate) registry_generation: u64,
+    pub(crate) mutation: Option<ExternalCheckoutMutation>,
+    pub(crate) respond_to: std::sync::mpsc::Sender<String>,
+    pub(crate) result: Result<ExternalCheckoutOutcome, (String, String)>,
+    pub(crate) removal_recovery: Option<ExternalCheckoutRemovalRecovery>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternalCheckoutRemovePrepared {
+    pub(crate) id: String,
+    pub(crate) source: ExternalCheckoutSource,
+    pub(crate) registry_generation: u64,
+    pub(crate) provider: crate::vcs::ActivatedProvider,
+    pub(crate) membership: crate::workspace::CheckoutSpaceMembership,
+    pub(crate) workspace_id: String,
+    pub(crate) checkout_key: std::path::PathBuf,
+    pub(crate) operation_id: u64,
+    pub(crate) force: bool,
+    pub(crate) respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExternalCheckoutMutation {
+    Create {
+        operation_id: u64,
+        checkout_key: std::path::PathBuf,
+    },
+    Remove {
+        operation_id: u64,
+        workspace_id: String,
+        checkout_key: std::path::PathBuf,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalCheckoutRemovalRecovery {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) shutdown_panes: Vec<crate::layout::PaneId>,
+    pub(crate) operation_id: u64,
+}
+
+#[derive(Debug)]
 pub struct ApiWorktreeAddRequest {
     pub id: String,
     pub operation_id: u64,
@@ -82,7 +190,10 @@ pub enum AppEvent {
         exit_reason: crate::platform::ChildExitReason,
     },
     /// A worktree-removal runtime could not be restored normally.
-    WorktreeRuntimeRestoreFailed { pane_id: PaneId, operation_id: u64 },
+    CheckoutRuntimeRestoreFailed {
+        pane_id: PaneId,
+        operation_id: u64,
+    },
     /// Process detection identified an agent before its screen state was confirmed.
     AgentProcessDetected {
         pane_id: PaneId,
@@ -90,7 +201,10 @@ pub enum AppEvent {
         observed_at: Instant,
     },
     /// The current Codex input screen is visible during managed startup.
-    CodexPromptObserved { pane_id: PaneId, ready: bool },
+    CodexPromptObserved {
+        pane_id: PaneId,
+        ready: bool,
+    },
     /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,
@@ -162,10 +276,15 @@ pub enum AppEvent {
     },
     /// A pane child emitted one or more executable BEL characters.
     /// The host-facing process forwards them to its outer terminal.
-    TerminalBell { pane_id: PaneId, count: u16 },
+    TerminalBell {
+        pane_id: PaneId,
+        count: u16,
+    },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
-    ClipboardWrite { content: Vec<u8> },
+    ClipboardWrite {
+        content: Vec<u8>,
+    },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {
@@ -177,6 +296,16 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// Configured external VCS discovery/status refresh completed.
+    ExternalVcsRefreshed {
+        generation: u64,
+        task_id: u64,
+        results: Vec<ExternalVcsRefreshResult>,
+        activations: Vec<crate::vcs::ActivatedProvider>,
+        failures: Vec<ExternalVcsFailure>,
+    },
+    ExternalCheckoutFinished(Box<ExternalCheckoutResult>),
+    ExternalCheckoutRemovePrepared(Box<ExternalCheckoutRemovePrepared>),
     /// A configured tab bar status command finished.
     TabBarCommandFinished {
         generation: u64,

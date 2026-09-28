@@ -110,6 +110,54 @@ Grouped worktrees still behave like normal Herdr workspaces: they can be focused
 
 To delete a worktree checkout, use `Delete worktree checkout...` on a grouped child workspace. Herdr runs `git worktree remove`, first asking Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
 
+### External version-control providers
+
+Herdr's generic VCS boundary lets a separately distributed executable translate a
+non-Git system into Herdr's normalized branch/status and checkout operations. The
+provider executable can remain private; Herdr configuration contains no native
+VCS commands or output parsers.
+
+```toml
+[[vcs.providers]]
+id = "private-vcs"
+display_name = "Private VCS"
+protocol = "stdio-json-v1"
+command = ["private-vcs-herdr-provider"]
+platforms = ["linux", "macos", "windows"]
+priority = 100
+checkout_directory = "~/.herdr/checkouts/private-vcs"
+discovery = [{ path = ".private/HEAD", type = "file" }]
+allow = ["inspect", "checkout.list", "checkout.create", "checkout.remove"]
+status_timeout_ms = 2000
+operation_timeout_ms = 120000
+```
+
+`command` is an argv array and is executed directly, without a shell. A bare
+program name resolves through `PATH`; an explicit relative path resolves from the
+directory containing `config.toml`. Windows batch files are not accepted as
+providers; use a native executable. Marker paths must be relative literal paths
+without `..` or globs. The deepest matching repository root wins, followed by
+`priority`; an exact tie disables selection and reports a diagnostic.
+
+`allow` is a security and feature allowlist. An operation is available only when
+Herdr understands it, the config allows it, and the provider advertises it from
+`describe`. `checkout.remove` requires `checkout.list`; force removal is additionally
+gated by `checkout.remove.force`.
+Unknown advertised capabilities are ignored. See [External VCS provider
+protocol](/docs/vcs-provider-protocol/) for the JSON contract.
+
+When a configured provider matches a workspace, Herdr displays its normalized
+branch and ahead/behind values in the existing sidebar tokens. Checkout actions
+are capability-driven: `New checkout`, `Open checkout...`, and `Delete checkout...`
+appear only when the provider and server support the corresponding operation.
+Git keeps its existing worktree wording and behavior.
+
+Checkout creation uses the provider's `checkout_directory`; the provider maps
+the entered checkout name to its own branch, stream, bookmark, or workspace
+model. Opening uses the opaque checkout ID returned by the provider. Herdr never
+deletes an external checkout directory itself, and removal is available only for
+entries the provider reports as managed.
+
 ## Remote attach
 
 Remote attach manages its SSH connection with temporary keepalives and, where supported, connection reuse by default.

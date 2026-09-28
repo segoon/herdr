@@ -1,0 +1,36 @@
+---
+title: 外部 VCS プロバイダープロトコル
+description: Herdr 用のアウトオブツリー VCS アダプターを実装します。
+---
+
+外部プロバイダーは、VCS 固有のモデルを Herdr の正規化モデルへ変換する短命な実行ファイルです。Herdr はリクエストごとにプロセスを起動し、標準入力へ JSON オブジェクトを 1 個書いて EOF を送り、標準出力から JSON レスポンスを 1 個読みます。標準エラーは診断専用です。
+
+## エンベロープ
+
+リクエストは `protocol_version: 1`、数値の `request_id`、`operation` を含みます。レスポンスはバージョンと ID を繰り返し、成功時は `status: "ok"` と `response`、失敗時は `status: "error"` と `error` を返します。`error` は安定した `code`、表示可能な `message`、`retryable` を含みます。
+
+## 正確なパス
+
+パスは `{ "encoding": "utf8", "value": "/absolute/path" }` 形式です。Unix の非 UTF-8 パスは `unix_bytes_base64`、Windows の UTF-16LE コード単位は `windows_utf16_le_base64` を使います。レスポンスのパスは絶対パスで NUL を含めません。
+
+## 操作
+
+### `describe`
+
+`inspect`、`checkout.list`、`checkout.create`、`checkout.remove`、`checkout.remove.force` の対応部分集合を返します。Herdr は未知の機能を無視し、設定の `allow` と共通する操作だけを有効にします。`checkout.remove` には、削除前の検証とタイムアウト後の照合に使う `checkout.list` も必要です。
+
+### `inspect`
+
+最大 256 個の `roots` を受け取ります。レスポンスの `items` は各 `root` と、省略可能な `branch`、`ahead`、`behind` を返します。VCS が提供できない情報は省略します。
+
+### `checkout.list`
+
+1 個の `root` を受け取り、`checkouts` を返します。各要素は安定した不透明な `id`、表示用 `name`、絶対 `path`、`managed` を含みます。
+
+### `checkout.create`
+
+`root`、ユーザー入力の `name`、絶対 `destination` を受け取り、作成した checkout を返します。ネイティブなブランチモデルへの対応付けはプロバイダーが決めます。
+
+### `checkout.remove`
+
+`root`、絶対 checkout パス、`force` を受け取ります。`force: true` は通常削除と強制削除の両機能が許可・合意された場合だけ送られます。削除はプロバイダーが行い、Herdr は外部 checkout を再帰削除しません。既存 checkout を開く処理は Herdr のワークスペース操作なので、プロバイダー要求はありません。

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod checkouts;
 pub mod commands;
 pub mod common;
 pub mod events;
@@ -15,6 +16,7 @@ pub mod workspaces;
 pub mod worktrees;
 
 pub use agents::*;
+pub use checkouts::*;
 pub use commands::*;
 pub use common::*;
 pub use events::*;
@@ -73,6 +75,8 @@ pub enum Method {
     ClientWindowTitleClear(EmptyParams),
     #[serde(rename = "client_shell.surface.set")]
     ClientShellSurfaceSet(ClientShellSurfaceSetParams),
+    #[serde(rename = "vcs.status_interest.set")]
+    VcsStatusInterestSet(VcsStatusInterestSetParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
     #[serde(rename = "workspace.create")]
@@ -101,6 +105,14 @@ pub enum Method {
     WorktreeOpen(WorktreeOpenParams),
     #[serde(rename = "worktree.remove")]
     WorktreeRemove(WorktreeRemoveParams),
+    #[serde(rename = "checkout.list")]
+    CheckoutList(CheckoutListParams),
+    #[serde(rename = "checkout.create")]
+    CheckoutCreate(CheckoutCreateParams),
+    #[serde(rename = "checkout.open")]
+    CheckoutOpen(CheckoutOpenParams),
+    #[serde(rename = "checkout.remove")]
+    CheckoutRemove(CheckoutRemoveParams),
     #[serde(rename = "tab.create")]
     TabCreate(TabCreateParams),
     #[serde(rename = "tab.list")]

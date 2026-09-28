@@ -320,9 +320,76 @@ pub struct Config {
     pub keys: KeysConfig,
     pub ui: UiConfig,
     pub worktrees: WorktreesConfig,
+    pub vcs: VcsConfig,
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct VcsConfig {
+    pub providers: Vec<VcsProviderConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VcsProviderConfig {
+    pub id: String,
+    pub display_name: String,
+    pub protocol: String,
+    pub command: Vec<String>,
+    pub platforms: Vec<String>,
+    pub priority: i32,
+    pub checkout_directory: Option<String>,
+    pub discovery: Vec<VcsDiscoveryMarkerConfig>,
+    pub allow: Vec<String>,
+    pub status_timeout_ms: u64,
+    pub operation_timeout_ms: u64,
+}
+
+impl Default for VcsProviderConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            protocol: "stdio-json-v1".into(),
+            command: Vec::new(),
+            platforms: Vec::new(),
+            priority: 0,
+            checkout_directory: None,
+            discovery: Vec::new(),
+            allow: Vec::new(),
+            status_timeout_ms: 2_000,
+            operation_timeout_ms: 120_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VcsDiscoveryMarkerConfig {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: VcsDiscoveryMarkerKind,
+}
+
+impl Default for VcsDiscoveryMarkerConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            kind: VcsDiscoveryMarkerKind::Any,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VcsDiscoveryMarkerKind {
+    File,
+    Directory,
+    #[default]
+    Any,
 }
 
 #[derive(Debug)]

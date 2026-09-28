@@ -31,6 +31,46 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+pub const VCS_PROJECTION_CAPABILITY: &str = "vcs_projection";
+pub const VCS_PROJECTION_KIND: &str = "endpoint.vcs.v1";
+pub const VCS_STATUS_INTEREST_CAPABILITY: &str = "vcs_status_interest";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointWorkspaceVcs {
+    pub provider_id: String,
+    pub provider_display_name: String,
+    pub repository_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u64>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub can_create_checkout: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<EndpointWorkspaceCheckout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointWorkspaceCheckout {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub managed: bool,
+    pub is_source: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointVcsProjection {
+    pub boot_id: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub workspaces: std::collections::BTreeMap<String, EndpointWorkspaceVcs>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -135,6 +175,15 @@ pub fn agent_view_projection_message(
     })
 }
 
+pub fn vcs_projection_message(
+    projection: &EndpointVcsProjection,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: VCS_PROJECTION_KIND.into(),
+        data: serde_json::to_string(projection)?,
+    })
+}
+
 impl EndpointClientHello {
     pub fn supports_required_codecs(&self) -> bool {
         self.snapshot_codecs
@@ -170,6 +219,8 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                VCS_PROJECTION_CAPABILITY.into(),
+                VCS_STATUS_INTEREST_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -214,6 +265,66 @@ mod tests {
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
+        }
+    }
+
+    #[test]
+    fn vcs_projection_is_an_optional_revision_bound_control() {
+        let projection = EndpointVcsProjection {
+            boot_id: "boot".into(),
+            revision: 7,
+            workspaces: [(
+                "w1".into(),
+                EndpointWorkspaceVcs {
+                    provider_id: "arc".into(),
+                    provider_display_name: "Arc".into(),
+                    repository_key: "arc:repo".into(),
+                    branch: Some("feature".into()),
+                    ahead: Some(2),
+                    behind: None,
+                    capabilities: vec!["inspect".into()],
+                    can_create_checkout: false,
+                    checkout: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let ServerMessage::EndpointControl { kind, data } =
+            vcs_projection_message(&projection).expect("projection message")
+        else {
+            panic!("endpoint control");
+        };
+        assert_eq!(kind, VCS_PROJECTION_KIND);
+        assert_eq!(
+            serde_json::from_str::<EndpointVcsProjection>(&data).unwrap(),
+            projection
+        );
+    }
+
+    #[test]
+    fn vcs_checkout_path_is_additive_and_optional() {
+        let legacy: EndpointWorkspaceCheckout = serde_json::from_value(serde_json::json!({
+            "id": "topic",
+            "name": "topic",
+            "managed": true,
+            "is_source": false,
+            "future_field": 7
+        }))
+        .unwrap();
+        assert_eq!(legacy.path, None);
+
+        let current = EndpointWorkspaceCheckout {
+            id: "topic".into(),
+            name: "topic".into(),
+            path: Some("/repo/topic".into()),
+            managed: true,
+            is_source: false,
+        };
+        let encoded = serde_json::to_value(current).unwrap();
+        assert_eq!(encoded["path"], "/repo/topic");
+        for required in ["id", "name", "managed", "is_source"] {
+            assert!(encoded.get(required).is_some(), "missing {required}");
         }
     }
 
@@ -377,6 +488,8 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                VCS_PROJECTION_CAPABILITY.to_string(),
+                VCS_STATUS_INTEREST_CAPABILITY.to_string(),
             ]
         );
     }

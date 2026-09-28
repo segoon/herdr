@@ -1913,6 +1913,11 @@ impl HeadlessServer {
                     config_diagnostic,
                     None,
                 );
+                let vcs_projection = crate::server::client_shell::vcs_projection(
+                    &self.app,
+                    &self.client_shell_boot_id,
+                    connection.shell_projection_revision,
+                );
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
                 let agent_view = self.app.state.agent_view_override.clone();
@@ -1947,9 +1952,18 @@ impl HeadlessServer {
                         return false;
                     }
                 };
+                let vcs_message =
+                    match crate::protocol::endpoint::vcs_projection_message(&vcs_projection) {
+                        Ok(message) => message,
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode VCS projection");
+                            return false;
+                        }
+                    };
                 connection.shell_location = Some(location);
                 connection.shell_snapshot = Some(seed_snapshot);
                 connection.shell_agent_completions = Some(completion_projection);
+                connection.shell_vcs_projection = Some(vcs_projection);
                 connection.shell_agent_view = agent_view;
                 self.clients.insert(client_id, connection);
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
@@ -1958,6 +1972,7 @@ impl HeadlessServer {
                 if let Some(message) = projection_message {
                     self.send_to_client(client_id, message);
                 }
+                self.send_to_client(client_id, vcs_message);
                 self.send_to_client(client_id, completion_message);
                 self.send_to_client(client_id, snapshot_message);
                 if surface_active {
@@ -1965,6 +1980,7 @@ impl HeadlessServer {
                 }
                 if first_app_client {
                     self.app.mark_git_status_refresh_due(Instant::now());
+                    self.app.mark_external_vcs_refresh_due(Instant::now());
                 }
                 self.sync_foreground_client_state();
                 self.claim_unowned_shell_tab_geometry(client_id, true);
@@ -2963,6 +2979,19 @@ impl HeadlessServer {
             );
             return changed | (deferred_changed && !read_only);
         }
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::CheckoutCreate(_)
+                | api::schema::Method::CheckoutRemove(_)
+                | api::schema::Method::CheckoutList(_)
+                | api::schema::Method::CheckoutOpen(_)
+        ) {
+            let read_only = matches!(&msg.request.method, api::schema::Method::CheckoutList(_));
+            let deferred_changed = self
+                .app
+                .handle_deferred_checkout_api_request(msg.request, msg.respond_to);
+            return changed | (deferred_changed && !read_only);
+        }
         if self.foreground_client_id.is_some_and(|client_id| {
             self.clients
                 .get(&client_id)
@@ -3226,6 +3255,12 @@ impl HeadlessServer {
 
         if self.has_app_client() {
             self.app.start_git_status_refresh_if_due(now);
+            let vcs_status_interest = self.clients.values().any(|client| {
+                matches!(client.mode, ClientConnectionMode::ClientShell)
+                    && client.shell_vcs_status_interest.unwrap_or(true)
+            });
+            self.app
+                .start_external_vcs_refresh_if_due(now, vcs_status_interest);
         }
 
         if self

@@ -13,8 +13,10 @@ mod api;
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
+mod checkout_runtime;
 mod creation;
 mod custom_commands;
+mod external_vcs_refresh;
 mod git_refresh;
 mod ids;
 mod popup;
@@ -25,6 +27,7 @@ mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+mod vcs_workspace;
 mod window_title;
 mod worktrees;
 
@@ -119,13 +122,18 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
-    pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
+    pub(crate) vcs_registry: crate::vcs::Registry,
+    pub(crate) external_vcs_refresh_in_flight: Option<u64>,
+    pub(crate) external_vcs_identity_refresh_requested: bool,
+    pub(crate) last_external_vcs_refresh: Instant,
+    pub(crate) last_external_vcs_discovery_refresh: Instant,
+    pub(crate) next_external_vcs_refresh_id: u64,
+    pub(crate) activated_vcs_providers: HashMap<String, crate::vcs::ActivatedProvider>,
+    pub(crate) external_vcs_retry_after: HashMap<String, Instant>,
+    pub(crate) checkout_requests: api::checkout_requests::CheckoutRequests,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
-    pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
-    pub(crate) pending_worktree_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
-    pub(crate) pending_worktree_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
-    pub(crate) next_api_worktree_operation_id: u64,
+    pub(crate) pending_checkout_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
+    pub(crate) pending_checkout_remove_runtime_restores: HashMap<crate::layout::PaneId, u64>,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
     pub(crate) update_version_check_enabled: bool,
@@ -565,6 +573,8 @@ impl App {
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
+        let vcs_registry = crate::vcs::Registry::from_config(&config.vcs, 1)
+            .unwrap_or_else(|_| crate::vcs::Registry::empty(1));
 
         let mut app = Self {
             config_diagnostic_deadline: None,
@@ -581,13 +591,19 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
-            pending_api_worktree_creates: HashMap::new(),
+            vcs_registry,
+            external_vcs_refresh_in_flight: None,
+            external_vcs_identity_refresh_requested: true,
+            last_external_vcs_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
+            last_external_vcs_discovery_refresh: Instant::now()
+                - GIT_REPO_DISCOVERY_REFRESH_INTERVAL,
+            next_external_vcs_refresh_id: 1,
+            activated_vcs_providers: HashMap::new(),
+            external_vcs_retry_after: HashMap::new(),
+            checkout_requests: api::checkout_requests::CheckoutRequests::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
-            pending_api_worktree_removes: HashMap::new(),
-            pending_api_worktree_remove_paths: HashMap::new(),
-            pending_worktree_remove_runtime_exits: HashMap::new(),
-            pending_worktree_remove_runtime_restores: HashMap::new(),
-            next_api_worktree_operation_id: 1,
+            pending_checkout_remove_runtime_exits: HashMap::new(),
+            pending_checkout_remove_runtime_restores: HashMap::new(),
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),
             next_agent_manifest_update_check: manifest_check_enabled
@@ -945,6 +961,32 @@ impl App {
         if !invalid_section("worktrees") {
             self.state.worktree_directory =
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
+        }
+
+        if !invalid_section("vcs") {
+            let generation = self.vcs_registry.generation().saturating_add(1);
+            match crate::vcs::Registry::from_config(&config.vcs, generation) {
+                Ok(registry) => {
+                    self.vcs_registry = registry;
+                    self.activated_vcs_providers.clear();
+                    self.external_vcs_retry_after.clear();
+                    for workspace in &mut self.state.workspaces {
+                        workspace.cached_external_vcs = None;
+                    }
+                    self.external_vcs_identity_refresh_requested = true;
+                    self.last_external_vcs_discovery_refresh = Instant::now()
+                        .checked_sub(GIT_REPO_DISCOVERY_REFRESH_INTERVAL)
+                        .unwrap_or_else(Instant::now);
+                    self.last_external_vcs_refresh = Instant::now()
+                        .checked_sub(GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+                        .unwrap_or_else(Instant::now);
+                }
+                Err(provider_diagnostics) => {
+                    diagnostics.extend(provider_diagnostics.into_iter().map(|message| {
+                        format!("invalid VCS provider config: {message}; kept current vcs settings")
+                    }))
+                }
+            }
         }
 
         if !invalid_section("theme") {
@@ -1789,6 +1831,49 @@ mod tests {
         let report = app.apply_live_config(&config, &[], &["session".into()], false);
         assert!(report.diagnostics.is_empty());
         assert_eq!(app.startup_per_agent_delay, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn live_vcs_config_atomically_replaces_registry_and_keeps_invalid_section() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("workspace")];
+        assert_eq!(app.vcs_registry.generation(), 1);
+        assert!(app.vcs_registry.providers().is_empty());
+
+        let mut config = Config::default();
+        config.vcs.providers.push(crate::config::VcsProviderConfig {
+            id: "private-vcs".into(),
+            display_name: "Private VCS".into(),
+            command: vec!["private-vcs-provider".into()],
+            platforms: vec![std::env::consts::OS.into()],
+            discovery: vec![crate::config::VcsDiscoveryMarkerConfig {
+                path: ".private/HEAD".into(),
+                kind: crate::config::VcsDiscoveryMarkerKind::File,
+            }],
+            allow: vec!["inspect".into()],
+            ..crate::config::VcsProviderConfig::default()
+        });
+        app.state.workspaces[0].cached_external_vcs = Some(crate::workspace::ExternalVcsState {
+            provider_id: "old-provider".into(),
+            provider_display_name: "Old Provider".into(),
+            repository_root: "/old".into(),
+            repository_key: "old:key".into(),
+            capabilities: std::collections::BTreeSet::new(),
+            checkout_directory: None,
+            branch: Some("stale".into()),
+            ahead: None,
+            behind: None,
+        });
+        let report = app.apply_live_config(&config, &[], &[], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.vcs_registry.generation(), 2);
+        assert_eq!(app.vcs_registry.providers().len(), 1);
+        assert!(app.state.workspaces[0].cached_external_vcs.is_none());
+
+        let report = app.apply_live_config(&Config::default(), &[], &["vcs".into()], false);
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.vcs_registry.generation(), 2);
+        assert_eq!(app.vcs_registry.providers().len(), 1);
     }
 
     #[test]

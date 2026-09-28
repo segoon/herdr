@@ -67,6 +67,12 @@ pub struct ClientShellSurfaceSetParams {
     pub active: bool,
 }
 
+/// Updates whether the requesting client needs periodically refreshed VCS status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct VcsStatusInterestSetParams {
+    pub interested: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitDirection {
