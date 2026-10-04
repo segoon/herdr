@@ -1,7 +1,7 @@
 use crate::api::schema::{CheckoutInfo, ResponseResult, WorkspaceCloseParams};
 use crate::events::{
-    ExternalCheckoutMutation, ExternalCheckoutOutcome, ExternalCheckoutRemovalRecovery,
-    ExternalCheckoutRemovePrepared, ExternalCheckoutResult, ExternalCheckoutSource,
+    ExternalCheckoutCompletion, ExternalCheckoutOutcome, ExternalCheckoutRemovePrepared,
+    ExternalCheckoutResult, ExternalCheckoutSource,
 };
 
 use super::super::responses::{encode_error, encode_success};
@@ -69,185 +69,155 @@ impl App {
             return;
         };
         let shutdown_panes = self.shutdown_workspace_terminal_runtimes_for_checkout_remove(ws_idx);
-        let removal_recovery = ExternalCheckoutRemovalRecovery {
-            path: operation.membership.checkout_path.clone(),
-            shutdown_panes: shutdown_panes.clone(),
-            operation_id: operation.operation_id,
-        };
-        let mutation = operation.mutation();
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result =
-                execute_checkout_remove(&provider, &context.source, operation, shutdown_panes)
-                    .await;
+            let result = execute_checkout_remove(&provider, &context.source, &operation).await;
             let _ = event_tx
-                .send(context.finished(Some(mutation), result, Some(removal_recovery)))
+                .send(context.finished(ExternalCheckoutCompletion::Remove {
+                    operation,
+                    shutdown_panes,
+                    result,
+                }))
                 .await;
         });
     }
 
     pub(crate) fn handle_external_checkout_finished(&mut self, result: ExternalCheckoutResult) {
-        let configuration_changed =
-            result.context.registry_generation != self.vcs_registry.generation();
-        if configuration_changed && result.mutation.is_none() {
-            let _ = result.context.respond_to.send(encode_error(
-                result.context.id,
-                "vcs_configuration_changed",
-                "VCS configuration changed while the request was running; retry the request",
-            ));
-            return;
-        }
-
-        let mutation_matches = result
-            .mutation
-            .as_ref()
-            .is_none_or(|mutation| match mutation {
-                ExternalCheckoutMutation::Create {
-                    operation_id,
-                    checkout_key,
-                } => self
-                    .checkout_requests
-                    .matches_create(*operation_id, checkout_key),
-                ExternalCheckoutMutation::Remove {
-                    operation_id,
-                    workspace_id,
-                    checkout_key,
-                } => {
-                    self.checkout_requests
-                        .matches_remove(*operation_id, workspace_id, checkout_key)
-                }
-            });
-        if !mutation_matches {
-            let _ = result.context.respond_to.send(encode_error(
-                result.context.id,
-                "checkout_operation_superseded",
-                "checkout operation is no longer current",
-            ));
-            return;
-        }
-
-        let outcome_unknown = result
-            .result
-            .as_ref()
-            .is_err_and(|(code, _)| code == "checkout_outcome_unknown");
-        let removal_workspace_still_matches = result.mutation.as_ref().is_none_or(|mutation| {
-            let ExternalCheckoutMutation::Remove {
-                workspace_id,
-                checkout_key,
-                ..
-            } = mutation
-            else {
-                return true;
-            };
-            self.state.workspaces.iter().any(|workspace| {
-                &workspace.id == workspace_id
-                    && workspace.checkout_space.as_ref().is_some_and(|membership| {
-                        membership.provider_id == result.context.source.provider_id
-                            && crate::worktree::canonical_or_original(&membership.checkout_path)
-                                == *checkout_key
-                    })
-            })
-        });
-        // An unknown outcome keeps its reservation for the rest of this server
-        // process; retrying the mutation could duplicate or destroy a checkout.
-        if let Some(mutation) = result.mutation.as_ref().filter(|_| !outcome_unknown) {
-            match mutation {
-                ExternalCheckoutMutation::Create {
-                    operation_id,
-                    checkout_key,
-                } => {
-                    self.checkout_requests
-                        .finish_create(*operation_id, checkout_key);
-                }
-                ExternalCheckoutMutation::Remove {
-                    operation_id,
-                    workspace_id,
-                    checkout_key,
-                } => {
-                    self.checkout_requests
-                        .finish_remove(*operation_id, workspace_id, checkout_key);
+        let ExternalCheckoutResult {
+            context,
+            completion,
+        } = result;
+        let response = match completion {
+            ExternalCheckoutCompletion::ReadOrCreate { creation, result } => {
+                if creation.is_none()
+                    && context.registry_generation != self.vcs_registry.generation()
+                {
+                    encode_error(context.id, "vcs_configuration_changed", "VCS configuration changed while the request was running; retry the request")
+                } else if creation.as_ref().is_some_and(|creation| {
+                    !self
+                        .checkout_requests
+                        .matches_create(creation.operation_id, &creation.checkout_key)
+                }) {
+                    encode_error(
+                        context.id,
+                        "checkout_operation_superseded",
+                        "checkout operation is no longer current",
+                    )
+                } else {
+                    let outcome_unknown = result
+                        .as_ref()
+                        .is_err_and(|(code, _)| code == "checkout_outcome_unknown");
+                    if let Some(creation) = creation.filter(|_| !outcome_unknown) {
+                        self.checkout_requests
+                            .finish_create(creation.operation_id, &creation.checkout_key);
+                    }
+                    match result {
+                        Err((code, message)) => encode_error(context.id, &code, message),
+                        Ok(ExternalCheckoutOutcome::Listed(checkouts)) => encode_success(
+                            context.id,
+                            ResponseResult::CheckoutList {
+                                source: checkout_source_info(&context.source),
+                                checkouts: checkouts
+                                    .into_iter()
+                                    .map(|checkout| self.checkout_info(checkout))
+                                    .collect(),
+                            },
+                        ),
+                        Ok(ExternalCheckoutOutcome::Opened {
+                            checkout,
+                            label,
+                            focus,
+                        }) => self.finish_external_checkout_open(
+                            context.id,
+                            context.source,
+                            checkout,
+                            label,
+                            focus,
+                            false,
+                        ),
+                        Ok(ExternalCheckoutOutcome::Created {
+                            checkout,
+                            label,
+                            focus,
+                        }) => self.finish_external_checkout_open(
+                            context.id,
+                            context.source,
+                            checkout,
+                            label,
+                            focus,
+                            true,
+                        ),
+                    }
                 }
             }
-        }
-        if result.result.is_err() && !outcome_unknown {
-            if let Some(recovery) = result.removal_recovery.as_ref() {
-                let _ = self.restore_shutdown_checkout_panes(
-                    &recovery.shutdown_panes,
-                    recovery.operation_id,
-                    &recovery.path,
-                    crate::app::checkout_runtime::CheckoutBackendKind::External,
-                );
-            }
-        }
-        let response = match result.result {
-            Err((code, message)) => encode_error(result.context.id, &code, message),
-            Ok(ExternalCheckoutOutcome::Listed(checkouts)) => encode_success(
-                result.context.id,
-                ResponseResult::CheckoutList {
-                    source: checkout_source_info(&result.context.source),
-                    checkouts: checkouts
-                        .into_iter()
-                        .map(|checkout| self.checkout_info(checkout))
-                        .collect(),
-                },
-            ),
-            Ok(ExternalCheckoutOutcome::Opened {
-                checkout,
-                label,
-                focus,
-            }) => self.finish_external_checkout_open(
-                result.context.id,
-                result.context.source,
-                checkout,
-                label,
-                focus,
-                false,
-            ),
-            Ok(ExternalCheckoutOutcome::Created {
-                checkout,
-                label,
-                focus,
-            }) => self.finish_external_checkout_open(
-                result.context.id,
-                result.context.source,
-                checkout,
-                label,
-                focus,
-                true,
-            ),
-            Ok(ExternalCheckoutOutcome::Removed {
-                workspace_id,
-                path,
-                force,
+            ExternalCheckoutCompletion::Remove {
+                operation,
                 shutdown_panes,
-                operation_id,
-            }) => {
-                if removal_workspace_still_matches {
-                    let _ = self.handle_workspace_close(
-                        String::new(),
-                        WorkspaceCloseParams {
-                            workspace_id: workspace_id.clone(),
-                            close_group: false,
-                        },
-                    );
+                result,
+            } => {
+                if !self.checkout_requests.matches_remove(
+                    operation.operation_id,
+                    &operation.workspace_id,
+                    &operation.checkout_key,
+                ) {
+                    encode_error(
+                        context.id,
+                        "checkout_operation_superseded",
+                        "checkout operation is no longer current",
+                    )
+                } else {
+                    let outcome_unknown = result
+                        .as_ref()
+                        .is_err_and(|(code, _)| code == "checkout_outcome_unknown");
+                    // Uncertain mutations keep their reservation until server restart.
+                    if !outcome_unknown {
+                        self.checkout_requests.finish_remove(
+                            operation.operation_id,
+                            &operation.workspace_id,
+                            &operation.checkout_key,
+                        );
+                    }
+                    let workspace_matches = self.state.workspaces.iter().any(|workspace| {
+                        workspace.id == operation.workspace_id
+                            && workspace.checkout_space.as_ref().is_some_and(|membership| {
+                                membership.provider_id == context.source.provider_id
+                                    && crate::worktree::canonical_or_original(
+                                        &membership.checkout_path,
+                                    ) == operation.checkout_key
+                            })
+                    });
+                    if result.is_ok() && workspace_matches {
+                        let _ = self.handle_workspace_close(
+                            String::new(),
+                            WorkspaceCloseParams {
+                                workspace_id: operation.workspace_id.clone(),
+                                close_group: false,
+                            },
+                        );
+                    }
+                    if !outcome_unknown {
+                        let _ = self.restore_shutdown_checkout_panes(
+                            &shutdown_panes,
+                            operation.operation_id,
+                            &operation.membership.checkout_path,
+                            crate::app::checkout_runtime::CheckoutBackendKind::External,
+                        );
+                    }
+                    match result {
+                        Err((code, message)) => encode_error(context.id, &code, message),
+                        Ok(()) => encode_success(
+                            context.id,
+                            ResponseResult::CheckoutRemoved {
+                                workspace_id: operation.workspace_id,
+                                path: operation.membership.checkout_path.display().to_string(),
+                                forced: operation.force,
+                            },
+                        ),
+                    }
                 }
-                let _ = self.restore_shutdown_checkout_panes(
-                    &shutdown_panes,
-                    operation_id,
-                    &path,
-                    crate::app::checkout_runtime::CheckoutBackendKind::External,
-                );
-                encode_success(
-                    result.context.id,
-                    ResponseResult::CheckoutRemoved {
-                        workspace_id,
-                        path: path.display().to_string(),
-                        forced: force,
-                    },
-                )
             }
         };
-        let _ = result.context.respond_to.send(response);
+        let _ = context.respond_to.send(response);
     }
 
     pub(super) fn finish_external_checkout_open(

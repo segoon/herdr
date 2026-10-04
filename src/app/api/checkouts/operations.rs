@@ -27,28 +27,38 @@ pub(super) enum CheckoutOperation {
 }
 
 impl PreparedCheckoutOperation {
-    pub(super) fn mutation(&self) -> Option<crate::events::ExternalCheckoutMutation> {
+    pub(super) fn failed(
+        self,
+        error: (String, String),
+    ) -> crate::events::ExternalCheckoutCompletion {
         match self {
-            Self::ReadOrCreate(CheckoutOperation::Create {
-                operation_id,
-                checkout_key,
-                ..
-            }) => Some(crate::events::ExternalCheckoutMutation::Create {
-                operation_id: *operation_id,
-                checkout_key: checkout_key.clone(),
-            }),
-            Self::Remove(operation) => Some(operation.mutation()),
-            Self::ReadOrCreate(CheckoutOperation::List | CheckoutOperation::Open { .. }) => None,
+            Self::Remove(operation) => crate::events::ExternalCheckoutCompletion::Remove {
+                operation,
+                shutdown_panes: Vec::new(),
+                result: Err(error),
+            },
+            Self::ReadOrCreate(operation) => {
+                crate::events::ExternalCheckoutCompletion::ReadOrCreate {
+                    creation: operation.creation(),
+                    result: Err(error),
+                }
+            }
         }
     }
 }
 
-impl crate::events::ExternalCheckoutRemoveOperation {
-    pub(super) fn mutation(&self) -> crate::events::ExternalCheckoutMutation {
-        crate::events::ExternalCheckoutMutation::Remove {
-            operation_id: self.operation_id,
-            workspace_id: self.workspace_id.clone(),
-            checkout_key: self.checkout_key.clone(),
+impl CheckoutOperation {
+    pub(super) fn creation(&self) -> Option<crate::events::ExternalCheckoutCreateReservation> {
+        match self {
+            Self::Create {
+                operation_id,
+                checkout_key,
+                ..
+            } => Some(crate::events::ExternalCheckoutCreateReservation {
+                operation_id: *operation_id,
+                checkout_key: checkout_key.clone(),
+            }),
+            Self::List | Self::Open { .. } => None,
         }
     }
 }
@@ -177,22 +187,17 @@ pub(super) async fn preflight_checkout_remove(
 pub(super) async fn execute_checkout_remove(
     provider: &crate::vcs::ActivatedProvider,
     source: &ExternalCheckoutSource,
-    operation: crate::events::ExternalCheckoutRemoveOperation,
-    shutdown_panes: Vec<crate::layout::PaneId>,
-) -> Result<ExternalCheckoutOutcome, (String, String)> {
+    operation: &crate::events::ExternalCheckoutRemoveOperation,
+) -> Result<(), (String, String)> {
     let crate::events::ExternalCheckoutRemoveOperation {
-        workspace_id,
-        membership,
-        force,
-        operation_id,
-        ..
+        membership, force, ..
     } = operation;
     let root = ExactPath::from_path(&source.repository_root);
     let remove_result = provider
         .checkout_remove(
             root.clone(),
             ExactPath::from_path(&membership.checkout_path),
-            force,
+            *force,
         )
         .await;
     if let Err(error) = remove_result {
@@ -223,13 +228,7 @@ pub(super) async fn execute_checkout_remove(
             return Err(provider_failure(error));
         }
     }
-    Ok(ExternalCheckoutOutcome::Removed {
-        workspace_id,
-        path: membership.checkout_path,
-        force,
-        shutdown_panes,
-        operation_id,
-    })
+    Ok(())
 }
 
 fn provider_failure(error: crate::vcs::ProviderFailure) -> (String, String) {

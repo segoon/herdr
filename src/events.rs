@@ -63,13 +63,6 @@ pub(crate) enum ExternalCheckoutOutcome {
         label: Option<String>,
         focus: bool,
     },
-    Removed {
-        workspace_id: String,
-        path: std::path::PathBuf,
-        force: bool,
-        shutdown_panes: Vec<crate::layout::PaneId>,
-        operation_id: u64,
-    },
 }
 
 #[derive(Debug)]
@@ -83,9 +76,21 @@ pub(crate) struct ExternalCheckoutContext {
 #[derive(Debug)]
 pub(crate) struct ExternalCheckoutResult {
     pub(crate) context: ExternalCheckoutContext,
-    pub(crate) mutation: Option<ExternalCheckoutMutation>,
-    pub(crate) result: Result<ExternalCheckoutOutcome, (String, String)>,
-    pub(crate) removal_recovery: Option<ExternalCheckoutRemovalRecovery>,
+    pub(crate) completion: ExternalCheckoutCompletion,
+}
+
+/// Removal owns its reservation and recovery facts throughout completion.
+#[derive(Debug)]
+pub(crate) enum ExternalCheckoutCompletion {
+    ReadOrCreate {
+        creation: Option<ExternalCheckoutCreateReservation>,
+        result: Result<ExternalCheckoutOutcome, (String, String)>,
+    },
+    Remove {
+        operation: ExternalCheckoutRemoveOperation,
+        shutdown_panes: Vec<PaneId>,
+        result: Result<(), (String, String)>,
+    },
 }
 
 #[derive(Debug)]
@@ -104,24 +109,10 @@ pub(crate) struct ExternalCheckoutRemoveOperation {
     pub(crate) force: bool,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum ExternalCheckoutMutation {
-    Create {
-        operation_id: u64,
-        checkout_key: std::path::PathBuf,
-    },
-    Remove {
-        operation_id: u64,
-        workspace_id: String,
-        checkout_key: std::path::PathBuf,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ExternalCheckoutRemovalRecovery {
-    pub(crate) path: std::path::PathBuf,
-    pub(crate) shutdown_panes: Vec<crate::layout::PaneId>,
+#[derive(Debug)]
+pub(crate) struct ExternalCheckoutCreateReservation {
     pub(crate) operation_id: u64,
+    pub(crate) checkout_key: std::path::PathBuf,
 }
 
 #[derive(Debug)]

@@ -3,8 +3,7 @@ mod operations;
 
 use crate::api::schema::{Method, Request};
 use crate::events::{
-    AppEvent, ExternalCheckoutContext, ExternalCheckoutMutation, ExternalCheckoutOutcome,
-    ExternalCheckoutRemovalRecovery, ExternalCheckoutRemoveOperation,
+    AppEvent, ExternalCheckoutCompletion, ExternalCheckoutContext, ExternalCheckoutRemoveOperation,
     ExternalCheckoutRemovePrepared, ExternalCheckoutResult, ExternalCheckoutSource,
 };
 
@@ -16,17 +15,10 @@ use super::responses::encode_error;
 use crate::app::App;
 
 impl ExternalCheckoutContext {
-    fn finished(
-        self,
-        mutation: Option<ExternalCheckoutMutation>,
-        result: Result<ExternalCheckoutOutcome, (String, String)>,
-        removal_recovery: Option<ExternalCheckoutRemovalRecovery>,
-    ) -> AppEvent {
+    fn finished(self, completion: ExternalCheckoutCompletion) -> AppEvent {
         AppEvent::ExternalCheckoutFinished(Box::new(ExternalCheckoutResult {
             context: self,
-            mutation,
-            result,
-            removal_recovery,
+            completion,
         }))
     }
 }
@@ -78,7 +70,6 @@ impl App {
         };
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let mutation = operation.mutation();
             let activated = match cached {
                 Some(provider) => Ok(provider),
                 None => provider.activate().await,
@@ -88,16 +79,14 @@ impl App {
                 Err(error) => {
                     let _ = event_tx
                         .send(context.finished(
-                            mutation,
-                            Err(("vcs_provider_failed".into(), error.to_string())),
-                            None,
+                            operation.failed(("vcs_provider_failed".into(), error.to_string())),
                         ))
                         .await;
                     return;
                 }
             };
             context.source.capabilities = activated.capabilities();
-            let result = match operation {
+            let completion = match operation {
                 PreparedCheckoutOperation::Remove(operation) => {
                     match preflight_checkout_remove(
                         &activated,
@@ -118,16 +107,21 @@ impl App {
                                 .await;
                             return;
                         }
-                        Err(error) => Err(error),
+                        Err(error) => ExternalCheckoutCompletion::Remove {
+                            operation,
+                            shutdown_panes: Vec::new(),
+                            result: Err(error),
+                        },
                     }
                 }
                 PreparedCheckoutOperation::ReadOrCreate(operation) => {
-                    run_checkout_operation(&activated, &mut context.source, operation).await
+                    let creation = operation.creation();
+                    let result =
+                        run_checkout_operation(&activated, &mut context.source, operation).await;
+                    ExternalCheckoutCompletion::ReadOrCreate { creation, result }
                 }
             };
-            let _ = event_tx
-                .send(context.finished(mutation, result, None))
-                .await;
+            let _ = event_tx.send(context.finished(completion)).await;
         });
         true
     }

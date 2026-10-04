@@ -1,8 +1,9 @@
 use crate::api::schema::{ErrorResponse, Method, Request, ResponseResult, SuccessResponse};
 use crate::config::Config;
 use crate::events::{
-    AppEvent, ExternalCheckoutContext, ExternalCheckoutMutation, ExternalCheckoutOutcome,
-    ExternalCheckoutRemovalRecovery, ExternalCheckoutResult, ExternalCheckoutSource,
+    AppEvent, ExternalCheckoutCompletion, ExternalCheckoutContext,
+    ExternalCheckoutCreateReservation, ExternalCheckoutOutcome, ExternalCheckoutRemoveOperation,
+    ExternalCheckoutResult, ExternalCheckoutSource,
 };
 use crate::workspace::{CheckoutSpaceMembership, Workspace};
 
@@ -199,17 +200,17 @@ async fn failed_external_remove_restores_its_checkout_runtime() {
             registry_generation: app.vcs_registry.generation(),
             respond_to,
         },
-        mutation: Some(ExternalCheckoutMutation::Remove {
-            operation_id,
-            workspace_id: workspace_id.clone(),
-            checkout_key,
-        }),
-        result: Err(("vcs_operation_failed".into(), "simulated failure".into())),
-        removal_recovery: Some(ExternalCheckoutRemovalRecovery {
-            path: checkout_path.clone(),
+        completion: ExternalCheckoutCompletion::Remove {
+            operation: ExternalCheckoutRemoveOperation {
+                operation_id,
+                workspace_id: workspace_id.clone(),
+                checkout_key,
+                membership: app.state.workspaces[0].checkout_space.clone().unwrap(),
+                force: false,
+            },
             shutdown_panes,
-            operation_id,
-        }),
+            result: Err(("vcs_operation_failed".into(), "simulated failure".into())),
+        },
     });
 
     let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
@@ -328,9 +329,10 @@ fn stale_read_completion_is_rejected_after_config_reload() {
             registry_generation: app.vcs_registry.generation().saturating_sub(1),
             respond_to,
         },
-        mutation: None,
-        result: Ok(ExternalCheckoutOutcome::Listed(Vec::new())),
-        removal_recovery: None,
+        completion: ExternalCheckoutCompletion::ReadOrCreate {
+            creation: None,
+            result: Ok(ExternalCheckoutOutcome::Listed(Vec::new())),
+        },
     });
 
     let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
@@ -370,19 +372,17 @@ fn successful_remove_is_grandfathered_across_config_reload() {
             registry_generation: app.vcs_registry.generation().saturating_sub(1),
             respond_to,
         },
-        mutation: Some(ExternalCheckoutMutation::Remove {
-            operation_id,
-            workspace_id: workspace_id.clone(),
-            checkout_key,
-        }),
-        result: Ok(ExternalCheckoutOutcome::Removed {
-            workspace_id,
-            path,
-            force: false,
+        completion: ExternalCheckoutCompletion::Remove {
+            operation: ExternalCheckoutRemoveOperation {
+                operation_id,
+                workspace_id,
+                checkout_key,
+                membership: app.state.workspaces[0].checkout_space.clone().unwrap(),
+                force: false,
+            },
             shutdown_panes: Vec::new(),
-            operation_id,
-        }),
-        removal_recovery: None,
+            result: Ok(()),
+        },
     });
 
     let response: SuccessResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
@@ -401,24 +401,44 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
         let path = std::path::PathBuf::from("/repo/topic");
         let checkout_key = crate::worktree::canonical_or_original(&path);
         let workspace_id = "workspace".to_owned();
-        let mutation = if removing {
+        let error = ("checkout_outcome_unknown".into(), "timed out".into());
+        let completion = if removing {
             let operation_id = app
                 .checkout_requests
                 .reserve_remove(workspace_id.clone(), checkout_key.clone())
                 .unwrap();
-            ExternalCheckoutMutation::Remove {
-                operation_id,
-                workspace_id: workspace_id.clone(),
-                checkout_key: checkout_key.clone(),
+            ExternalCheckoutCompletion::Remove {
+                operation: ExternalCheckoutRemoveOperation {
+                    operation_id,
+                    workspace_id: workspace_id.clone(),
+                    checkout_key: checkout_key.clone(),
+                    membership: CheckoutSpaceMembership {
+                        provider_id: "arc".into(),
+                        provider_display_name: "Arc".into(),
+                        repository_key: "arc:repo".into(),
+                        repository_root: "/repo".into(),
+                        checkout_id: "topic".into(),
+                        checkout_name: "topic".into(),
+                        checkout_path: path.clone(),
+                        managed: true,
+                        source_workspace_id: None,
+                    },
+                    force: false,
+                },
+                shutdown_panes: Vec::new(),
+                result: Err(error),
             }
         } else {
             let operation_id = app
                 .checkout_requests
                 .reserve_create(checkout_key.clone())
                 .unwrap();
-            ExternalCheckoutMutation::Create {
-                operation_id,
-                checkout_key: checkout_key.clone(),
+            ExternalCheckoutCompletion::ReadOrCreate {
+                creation: Some(ExternalCheckoutCreateReservation {
+                    operation_id,
+                    checkout_key: checkout_key.clone(),
+                }),
+                result: Err(error),
             }
         };
         let (respond_to, response_rx) = std::sync::mpsc::channel();
@@ -430,9 +450,7 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
                 registry_generation: app.vcs_registry.generation(),
                 respond_to,
             },
-            mutation: Some(mutation),
-            result: Err(("checkout_outcome_unknown".into(), "timed out".into())),
-            removal_recovery: None,
+            completion,
         });
 
         let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
