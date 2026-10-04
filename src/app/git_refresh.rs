@@ -76,9 +76,8 @@ impl App {
 
     pub(crate) fn request_git_identity_refresh(&mut self, now: Instant) {
         self.git_identity_refresh_requested = true;
-        self.external_vcs_identity_refresh_requested = true;
         self.mark_git_status_refresh_due(now);
-        self.mark_external_vcs_refresh_due(now);
+        self.external_vcs.request_identity_refresh(now);
     }
 
     pub(crate) fn mark_git_status_refresh_due(&mut self, now: Instant) {

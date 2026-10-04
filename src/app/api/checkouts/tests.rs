@@ -197,7 +197,7 @@ async fn failed_external_remove_restores_its_checkout_runtime() {
                 source_cwd: checkout_path.clone(),
                 ..source()
             },
-            registry_generation: app.vcs_registry.generation(),
+            registry_generation: app.external_vcs.registry().generation(),
             respond_to,
         },
         completion: ExternalCheckoutCompletion::Remove {
@@ -328,7 +328,7 @@ fn stale_read_completion_is_rejected_after_config_reload() {
         context: ExternalCheckoutContext {
             id: "request".into(),
             source: source(),
-            registry_generation: app.vcs_registry.generation().saturating_sub(1),
+            registry_generation: app.external_vcs.registry().generation().saturating_sub(1),
             respond_to,
         },
         completion: ExternalCheckoutCompletion::ReadOrCreate {
@@ -371,7 +371,7 @@ fn successful_remove_is_grandfathered_across_config_reload() {
         context: ExternalCheckoutContext {
             id: "request".into(),
             source: source(),
-            registry_generation: app.vcs_registry.generation().saturating_sub(1),
+            registry_generation: app.external_vcs.registry().generation().saturating_sub(1),
             respond_to,
         },
         completion: ExternalCheckoutCompletion::Remove {
@@ -449,7 +449,7 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
             context: ExternalCheckoutContext {
                 id: "request".into(),
                 source: source(),
-                registry_generation: app.vcs_registry.generation(),
+                registry_generation: app.external_vcs.registry().generation(),
                 respond_to,
             },
             completion,
@@ -493,7 +493,7 @@ fn provider_error_text_cannot_quarantine_a_completed_mutation() {
         context: ExternalCheckoutContext {
             id: "create".into(),
             source: source(),
-            registry_generation: app.vcs_registry.generation(),
+            registry_generation: app.external_vcs.registry().generation(),
             respond_to,
         },
         completion: ExternalCheckoutCompletion::ReadOrCreate {

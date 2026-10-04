@@ -138,36 +138,15 @@ impl App {
         activations: Vec<crate::vcs::ActivatedProvider>,
         failures: Vec<crate::events::ExternalVcsFailure>,
     ) -> bool {
-        if self.external_vcs_refresh_in_flight != Some(task_id) {
+        let Some(failed_providers) = self.external_vcs.accept_completion(
+            generation,
+            task_id,
+            activations,
+            failures,
+            Instant::now(),
+        ) else {
             return false;
-        }
-        self.external_vcs_refresh_in_flight = None;
-        if generation != self.vcs_registry.generation() {
-            return false;
-        }
-        for provider in activations {
-            self.external_vcs_retry_after.remove(provider.id());
-            self.activated_vcs_providers
-                .insert(provider.id().to_owned(), provider);
-        }
-        let failed_providers = failures
-            .iter()
-            .map(|failure| failure.provider_id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        for failure in &failures {
-            tracing::warn!(
-                provider = %failure.provider_id,
-                stage = ?failure.stage,
-                retryable = failure.retryable,
-                error = %failure.message,
-                "external VCS refresh failed"
-            );
-        }
-        let retry_at = Instant::now() + Duration::from_secs(30);
-        for provider_id in &failed_providers {
-            self.external_vcs_retry_after
-                .insert(provider_id.clone(), retry_at);
-        }
+        };
         let mut by_workspace = results
             .into_iter()
             .map(|result| (result.workspace_id.clone(), result))
@@ -2569,11 +2548,11 @@ mod tests {
             behind: None,
         };
         app.state.workspaces[0].cached_external_vcs = Some(cached.clone());
-        app.external_vcs_refresh_in_flight = Some(7);
+        let first_task = app.external_vcs.begin_refresh(Instant::now(), true);
 
         app.handle_external_vcs_refreshed(
-            app.vcs_registry.generation(),
-            7,
+            app.external_vcs.registry().generation(),
+            first_task,
             vec![crate::events::ExternalVcsRefreshResult {
                 workspace_id: workspace_id.clone(),
                 resolved_identity_cwd: cwd.clone(),
@@ -2591,10 +2570,10 @@ mod tests {
         );
         assert_eq!(app.state.workspaces[0].cached_external_vcs, Some(cached));
 
-        app.external_vcs_refresh_in_flight = Some(8);
+        let second_task = app.external_vcs.begin_refresh(Instant::now(), true);
         app.handle_external_vcs_refreshed(
-            app.vcs_registry.generation(),
-            8,
+            app.external_vcs.registry().generation(),
+            second_task,
             vec![crate::events::ExternalVcsRefreshResult {
                 workspace_id,
                 resolved_identity_cwd: cwd,

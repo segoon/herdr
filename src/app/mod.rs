@@ -17,6 +17,7 @@ mod checkout_runtime;
 mod creation;
 mod custom_commands;
 mod external_vcs_refresh;
+mod external_vcs_runtime;
 mod git_refresh;
 mod ids;
 mod popup;
@@ -122,14 +123,7 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
-    pub(crate) vcs_registry: crate::vcs::Registry,
-    pub(crate) external_vcs_refresh_in_flight: Option<u64>,
-    pub(crate) external_vcs_identity_refresh_requested: bool,
-    pub(crate) last_external_vcs_refresh: Instant,
-    pub(crate) last_external_vcs_discovery_refresh: Instant,
-    pub(crate) next_external_vcs_refresh_id: u64,
-    pub(crate) activated_vcs_providers: HashMap<String, crate::vcs::ActivatedProvider>,
-    pub(crate) external_vcs_retry_after: HashMap<String, Instant>,
+    pub(crate) external_vcs: external_vcs_runtime::ExternalVcsRuntime,
     pub(crate) checkout_requests: api::checkout_requests::CheckoutRequests,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pending_checkout_remove_runtime_exits: HashMap<crate::layout::PaneId, usize>,
@@ -591,15 +585,10 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
-            vcs_registry,
-            external_vcs_refresh_in_flight: None,
-            external_vcs_identity_refresh_requested: true,
-            last_external_vcs_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
-            last_external_vcs_discovery_refresh: Instant::now()
-                - GIT_REPO_DISCOVERY_REFRESH_INTERVAL,
-            next_external_vcs_refresh_id: 1,
-            activated_vcs_providers: HashMap::new(),
-            external_vcs_retry_after: HashMap::new(),
+            external_vcs: external_vcs_runtime::ExternalVcsRuntime::new(
+                vcs_registry,
+                Instant::now(),
+            ),
             checkout_requests: api::checkout_requests::CheckoutRequests::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             pending_checkout_remove_runtime_exits: HashMap::new(),
@@ -964,22 +953,14 @@ impl App {
         }
 
         if !invalid_section("vcs") {
-            let generation = self.vcs_registry.generation().saturating_add(1);
-            match crate::vcs::Registry::from_config(&config.vcs, generation) {
-                Ok(registry) => {
-                    self.vcs_registry = registry;
-                    self.activated_vcs_providers.clear();
-                    self.external_vcs_retry_after.clear();
+            match self
+                .external_vcs
+                .replace_config(&config.vcs, Instant::now())
+            {
+                Ok(()) => {
                     for workspace in &mut self.state.workspaces {
                         workspace.cached_external_vcs = None;
                     }
-                    self.external_vcs_identity_refresh_requested = true;
-                    self.last_external_vcs_discovery_refresh = Instant::now()
-                        .checked_sub(GIT_REPO_DISCOVERY_REFRESH_INTERVAL)
-                        .unwrap_or_else(Instant::now);
-                    self.last_external_vcs_refresh = Instant::now()
-                        .checked_sub(GIT_REMOTE_STATUS_REFRESH_INTERVAL)
-                        .unwrap_or_else(Instant::now);
                 }
                 Err(provider_diagnostics) => {
                     diagnostics.extend(provider_diagnostics.into_iter().map(|message| {
@@ -1837,8 +1818,8 @@ mod tests {
     fn live_vcs_config_atomically_replaces_registry_and_keeps_invalid_section() {
         let mut app = test_app();
         app.state.workspaces = vec![Workspace::test_new("workspace")];
-        assert_eq!(app.vcs_registry.generation(), 1);
-        assert!(app.vcs_registry.providers().is_empty());
+        assert_eq!(app.external_vcs.registry().generation(), 1);
+        assert!(app.external_vcs.registry().providers().is_empty());
 
         let mut config = Config::default();
         config.vcs.providers.push(crate::config::VcsProviderConfig {
@@ -1866,14 +1847,14 @@ mod tests {
         });
         let report = app.apply_live_config(&config, &[], &[], false);
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(app.vcs_registry.generation(), 2);
-        assert_eq!(app.vcs_registry.providers().len(), 1);
+        assert_eq!(app.external_vcs.registry().generation(), 2);
+        assert_eq!(app.external_vcs.registry().providers().len(), 1);
         assert!(app.state.workspaces[0].cached_external_vcs.is_none());
 
         let report = app.apply_live_config(&Config::default(), &[], &["vcs".into()], false);
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
-        assert_eq!(app.vcs_registry.generation(), 2);
-        assert_eq!(app.vcs_registry.providers().len(), 1);
+        assert_eq!(app.external_vcs.registry().generation(), 2);
+        assert_eq!(app.external_vcs.registry().providers().len(), 1);
     }
 
     #[test]

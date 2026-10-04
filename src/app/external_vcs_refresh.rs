@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::{App, GIT_REMOTE_STATUS_REFRESH_INTERVAL, GIT_REPO_DISCOVERY_REFRESH_INTERVAL};
+use super::App;
 use crate::events::{
     AppEvent, ExternalVcsFailure, ExternalVcsFailureStage, ExternalVcsObservation,
     ExternalVcsRefreshResult,
@@ -20,9 +20,7 @@ struct Target {
 
 impl App {
     pub(crate) fn mark_external_vcs_refresh_due(&mut self, now: Instant) {
-        self.last_external_vcs_refresh = now
-            .checked_sub(GIT_REMOTE_STATUS_REFRESH_INTERVAL)
-            .unwrap_or(now);
+        self.external_vcs.mark_due(now);
     }
 
     pub(crate) fn start_external_vcs_refresh_if_due(
@@ -30,17 +28,11 @@ impl App {
         now: Instant,
         client_status_interest: bool,
     ) {
-        if self.vcs_registry.providers().is_empty()
-            || self.external_vcs_refresh_in_flight.is_some()
-            || now.saturating_duration_since(self.last_external_vcs_refresh)
-                < GIT_REMOTE_STATUS_REFRESH_INTERVAL
-        {
+        if !self.external_vcs.refresh_due(now) {
             return;
         }
         let demand = self.external_vcs_status_demand() || client_status_interest;
-        let refresh_identity = self.external_vcs_identity_refresh_requested
-            || now.saturating_duration_since(self.last_external_vcs_discovery_refresh)
-                >= GIT_REPO_DISCOVERY_REFRESH_INTERVAL;
+        let refresh_identity = self.external_vcs.identity_due(now);
         if !refresh_identity && !demand {
             return;
         }
@@ -53,7 +45,8 @@ impl App {
             let Some(cwd) = cwd else { continue };
             if let Some(membership) = workspace.checkout_space.as_ref() {
                 if self
-                    .vcs_registry
+                    .external_vcs
+                    .registry()
                     .provider(&membership.provider_id)
                     .is_some()
                 {
@@ -89,7 +82,7 @@ impl App {
                 }
                 continue;
             }
-            let discovered = match self.vcs_registry.discover(&cwd) {
+            let discovered = match self.external_vcs.registry().discover(&cwd) {
                 Ok(Some(discovered)) => discovered,
                 Ok(None) => {
                     observations.push(ExternalVcsRefreshResult {
@@ -128,27 +121,16 @@ impl App {
             });
         }
 
-        let generation = self.vcs_registry.generation();
-        let registry = self.vcs_registry.clone();
-        let cached = self.activated_vcs_providers.clone();
+        let generation = self.external_vcs.registry().generation();
+        let registry = self.external_vcs.registry().clone();
+        let cached = self.external_vcs.activated().clone();
         let had_discovered_targets = !targets.is_empty();
-        targets.retain(|target| {
-            self.external_vcs_retry_after
-                .get(&target.provider_id)
-                .is_none_or(|deadline| now >= *deadline)
-        });
+        targets.retain(|target| self.external_vcs.retry_ready(&target.provider_id, now));
         if had_discovered_targets && targets.is_empty() && observations.is_empty() {
-            self.last_external_vcs_refresh = now;
+            self.external_vcs.defer_refresh(now);
             return;
         }
-        let task_id = self.next_external_vcs_refresh_id;
-        self.next_external_vcs_refresh_id = task_id.saturating_add(1);
-        self.external_vcs_refresh_in_flight = Some(task_id);
-        self.external_vcs_identity_refresh_requested = false;
-        if refresh_identity {
-            self.last_external_vcs_discovery_refresh = now;
-        }
-        self.last_external_vcs_refresh = now;
+        let task_id = self.external_vcs.begin_refresh(now, refresh_identity);
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             let (mut results, activations, failures) =

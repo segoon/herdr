@@ -67,7 +67,12 @@ impl App {
                 return true;
             }
         };
-        let Some(provider) = self.vcs_registry.provider(&source.provider_id).cloned() else {
+        let Some(provider) = self
+            .external_vcs
+            .registry()
+            .provider(&source.provider_id)
+            .cloned()
+        else {
             let _ = respond_to.send(encode_error(
                 request.id,
                 "vcs_provider_unavailable",
@@ -83,13 +88,14 @@ impl App {
             }
         };
         let cached = self
-            .activated_vcs_providers
+            .external_vcs
+            .activated()
             .get(&source.provider_id)
             .cloned();
         let mut context = ExternalCheckoutContext {
             id: request.id,
             source,
-            registry_generation: self.vcs_registry.generation(),
+            registry_generation: self.external_vcs.registry().generation(),
             respond_to,
         };
         let event_tx = self.event_tx.clone();
@@ -300,7 +306,8 @@ impl App {
             }
         }
         let discovered = self
-            .vcs_registry
+            .external_vcs
+            .registry()
             .discover(&source_cwd)
             .map_err(|message| ("vcs_discovery_failed".into(), message))?
             .ok_or_else(|| {

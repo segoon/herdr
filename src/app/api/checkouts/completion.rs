@@ -33,7 +33,8 @@ impl App {
             return;
         }
 
-        let rejection = if context.registry_generation != self.vcs_registry.generation() {
+        let rejection = if context.registry_generation != self.external_vcs.registry().generation()
+        {
             Some((
                 "vcs_configuration_changed",
                 "VCS configuration changed before checkout removal started; retry the request",
@@ -90,7 +91,7 @@ impl App {
         let response = match completion {
             ExternalCheckoutCompletion::ReadOrCreate { creation, result } => {
                 if creation.is_none()
-                    && context.registry_generation != self.vcs_registry.generation()
+                    && context.registry_generation != self.external_vcs.registry().generation()
                 {
                     encode_error(context.id, "vcs_configuration_changed", "VCS configuration changed while the request was running; retry the request")
                 } else if creation.as_ref().is_some_and(|creation| {
@@ -285,8 +286,8 @@ impl App {
             self.state.workspaces[opened.index].set_custom_name(label);
         }
         self.finalize_checkout_workspace_open(opened);
-        self.external_vcs_identity_refresh_requested = true;
-        self.mark_external_vcs_refresh_due(std::time::Instant::now());
+        self.external_vcs
+            .request_identity_refresh(std::time::Instant::now());
         let info = self.checkout_info(checkout);
         let records = self.checkout_workspace_records(opened.index);
         let payload = if created {
