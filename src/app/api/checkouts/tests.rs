@@ -1,8 +1,8 @@
 use crate::api::schema::{ErrorResponse, Method, Request, ResponseResult, SuccessResponse};
 use crate::config::Config;
 use crate::events::{
-    AppEvent, ExternalCheckoutMutation, ExternalCheckoutOutcome, ExternalCheckoutRemovalRecovery,
-    ExternalCheckoutResult, ExternalCheckoutSource,
+    AppEvent, ExternalCheckoutContext, ExternalCheckoutMutation, ExternalCheckoutOutcome,
+    ExternalCheckoutRemovalRecovery, ExternalCheckoutResult, ExternalCheckoutSource,
 };
 use crate::vcs::ExactPath;
 use crate::workspace::{CheckoutSpaceMembership, Workspace};
@@ -190,19 +190,21 @@ async fn failed_external_remove_restores_its_checkout_runtime() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
 
     app.handle_external_checkout_finished(ExternalCheckoutResult {
-        id: "remove".into(),
-        source: ExternalCheckoutSource {
-            repository_root: root.clone(),
-            source_cwd: checkout_path.clone(),
-            ..source()
+        context: ExternalCheckoutContext {
+            id: "remove".into(),
+            source: ExternalCheckoutSource {
+                repository_root: root.clone(),
+                source_cwd: checkout_path.clone(),
+                ..source()
+            },
+            registry_generation: app.vcs_registry.generation(),
+            respond_to,
         },
-        registry_generation: app.vcs_registry.generation(),
         mutation: Some(ExternalCheckoutMutation::Remove {
             operation_id,
             workspace_id: workspace_id.clone(),
             checkout_key,
         }),
-        respond_to,
         result: Err(("vcs_operation_failed".into(), "simulated failure".into())),
         removal_recovery: Some(ExternalCheckoutRemovalRecovery {
             path: checkout_path.clone(),
@@ -321,11 +323,13 @@ fn stale_read_completion_is_rejected_after_config_reload() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
 
     app.handle_external_checkout_finished(ExternalCheckoutResult {
-        id: "request".into(),
-        source: source(),
-        registry_generation: app.vcs_registry.generation().saturating_sub(1),
+        context: ExternalCheckoutContext {
+            id: "request".into(),
+            source: source(),
+            registry_generation: app.vcs_registry.generation().saturating_sub(1),
+            respond_to,
+        },
         mutation: None,
-        respond_to,
         result: Ok(ExternalCheckoutOutcome::Listed(Vec::new())),
         removal_recovery: None,
     });
@@ -361,15 +365,17 @@ fn successful_remove_is_grandfathered_across_config_reload() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
 
     app.handle_external_checkout_finished(ExternalCheckoutResult {
-        id: "request".into(),
-        source: source(),
-        registry_generation: app.vcs_registry.generation().saturating_sub(1),
+        context: ExternalCheckoutContext {
+            id: "request".into(),
+            source: source(),
+            registry_generation: app.vcs_registry.generation().saturating_sub(1),
+            respond_to,
+        },
         mutation: Some(ExternalCheckoutMutation::Remove {
             operation_id,
             workspace_id: workspace_id.clone(),
             checkout_key,
         }),
-        respond_to,
         result: Ok(ExternalCheckoutOutcome::Removed {
             workspace_id,
             path,
@@ -401,14 +407,16 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
 
     app.handle_external_checkout_finished(ExternalCheckoutResult {
-        id: "request".into(),
-        source: source(),
-        registry_generation: app.vcs_registry.generation(),
+        context: ExternalCheckoutContext {
+            id: "request".into(),
+            source: source(),
+            registry_generation: app.vcs_registry.generation(),
+            respond_to,
+        },
         mutation: Some(ExternalCheckoutMutation::Create {
             operation_id,
             checkout_key: checkout_key.clone(),
         }),
-        respond_to,
         result: Err(("checkout_outcome_unknown".into(), "timed out".into())),
         removal_recovery: None,
     });

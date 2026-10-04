@@ -3,15 +3,33 @@ mod operations;
 
 use crate::api::schema::{Method, Request};
 use crate::events::{
-    AppEvent, ExternalCheckoutMutation, ExternalCheckoutRemovePrepared, ExternalCheckoutResult,
-    ExternalCheckoutSource,
+    AppEvent, ExternalCheckoutContext, ExternalCheckoutMutation, ExternalCheckoutOutcome,
+    ExternalCheckoutRemovalRecovery, ExternalCheckoutRemoveOperation,
+    ExternalCheckoutRemovePrepared, ExternalCheckoutResult, ExternalCheckoutSource,
 };
 
 use self::operations::{
     checkout_create_destination, preflight_checkout_remove, run_checkout_operation,
+    CheckoutOperation, PreparedCheckoutOperation,
 };
 use super::responses::encode_error;
 use crate::app::App;
+
+impl ExternalCheckoutContext {
+    fn finished(
+        self,
+        mutation: Option<ExternalCheckoutMutation>,
+        result: Result<ExternalCheckoutOutcome, (String, String)>,
+        removal_recovery: Option<ExternalCheckoutRemovalRecovery>,
+    ) -> AppEvent {
+        AppEvent::ExternalCheckoutFinished(Box::new(ExternalCheckoutResult {
+            context: self,
+            mutation,
+            result,
+            removal_recovery,
+        }))
+    }
+}
 
 impl App {
     pub(crate) fn handle_deferred_checkout_api_request(
@@ -41,91 +59,26 @@ impl App {
             ));
             return true;
         };
+        let operation = match self.prepare_checkout_operation(&provider, request.method) {
+            Ok(operation) => operation,
+            Err((code, message)) => {
+                let _ = respond_to.send(encode_error(request.id, &code, message));
+                return true;
+            }
+        };
         let cached = self
             .activated_vcs_providers
             .get(&source.provider_id)
             .cloned();
-        let registry_generation = self.vcs_registry.generation();
+        let mut context = ExternalCheckoutContext {
+            id: request.id,
+            source,
+            registry_generation: self.vcs_registry.generation(),
+            respond_to,
+        };
         let event_tx = self.event_tx.clone();
-        let mut create_destination = None;
-        let mut mutation = None;
-        let mut remove_context = None;
-        if let Method::CheckoutCreate(params) = &request.method {
-            let destination = match checkout_create_destination(&provider, params) {
-                Ok(destination) => destination,
-                Err((code, message)) => {
-                    let _ = respond_to.send(encode_error(request.id, &code, message));
-                    return true;
-                }
-            };
-            let checkout_key = crate::worktree::canonical_or_original(&destination);
-            let Ok(operation_id) = self.checkout_requests.reserve_create(checkout_key.clone())
-            else {
-                let _ = respond_to.send(encode_error(
-                    request.id,
-                    "checkout_operation_in_progress",
-                    "another checkout operation is already in progress for this path",
-                ));
-                return true;
-            };
-            create_destination = Some(destination);
-            mutation = Some(ExternalCheckoutMutation::Create {
-                operation_id,
-                checkout_key,
-            });
-        }
-        if let Method::CheckoutRemove(params) = &request.method {
-            let Some(ws_idx) = self.parse_workspace_id(&params.workspace_id) else {
-                let _ = respond_to.send(encode_error(
-                    request.id,
-                    "workspace_not_found",
-                    "workspace does not exist",
-                ));
-                return true;
-            };
-            let Some(membership) = self.state.workspaces[ws_idx].checkout_space.clone() else {
-                let _ = respond_to.send(encode_error(
-                    request.id,
-                    "checkout_not_managed",
-                    "workspace is not an external VCS checkout",
-                ));
-                return true;
-            };
-            if !membership.managed {
-                let _ = respond_to.send(encode_error(
-                    request.id,
-                    "checkout_not_managed",
-                    "provider did not mark this checkout as managed",
-                ));
-                return true;
-            }
-            let checkout_key = crate::worktree::canonical_or_original(&membership.checkout_path);
-            let Ok(operation_id) = self
-                .checkout_requests
-                .reserve_remove(params.workspace_id.clone(), checkout_key.clone())
-            else {
-                let _ = respond_to.send(encode_error(
-                    request.id,
-                    "checkout_operation_in_progress",
-                    "another checkout operation is already in progress for this checkout",
-                ));
-                return true;
-            };
-            mutation = Some(ExternalCheckoutMutation::Remove {
-                operation_id,
-                workspace_id: params.workspace_id.clone(),
-                checkout_key: checkout_key.clone(),
-            });
-            remove_context = Some((
-                membership,
-                params.workspace_id.clone(),
-                checkout_key,
-                operation_id,
-                params.force,
-            ));
-        }
         tokio::spawn(async move {
-            let mut source = source;
+            let mutation = operation.mutation();
             let activated = match cached {
                 Some(provider) => Ok(provider),
                 None => provider.activate().await,
@@ -134,80 +87,138 @@ impl App {
                 Ok(activated) => activated,
                 Err(error) => {
                     let _ = event_tx
-                        .send(AppEvent::ExternalCheckoutFinished(Box::new(
-                            ExternalCheckoutResult {
-                                id: request.id,
-                                source,
-                                registry_generation,
-                                mutation,
-                                respond_to,
-                                result: Err(("vcs_provider_failed".into(), error.to_string())),
-                                removal_recovery: None,
-                            },
-                        )))
+                        .send(context.finished(
+                            mutation,
+                            Err(("vcs_provider_failed".into(), error.to_string())),
+                            None,
+                        ))
                         .await;
                     return;
                 }
             };
-            source.capabilities = activated.capabilities();
-            if let Some((membership, workspace_id, checkout_key, operation_id, force)) =
-                remove_context
-            {
-                match preflight_checkout_remove(&activated, &mut source, &membership).await {
-                    Ok(()) => {
-                        let _ = event_tx
-                            .send(AppEvent::ExternalCheckoutRemovePrepared(Box::new(
-                                ExternalCheckoutRemovePrepared {
-                                    id: request.id,
-                                    source,
-                                    registry_generation,
-                                    provider: activated,
-                                    membership,
-                                    workspace_id,
-                                    checkout_key,
-                                    operation_id,
-                                    force,
-                                    respond_to,
-                                },
-                            )))
-                            .await;
-                    }
-                    Err(error) => {
-                        let _ = event_tx
-                            .send(AppEvent::ExternalCheckoutFinished(Box::new(
-                                ExternalCheckoutResult {
-                                    id: request.id,
-                                    source,
-                                    registry_generation,
-                                    mutation,
-                                    respond_to,
-                                    result: Err(error),
-                                    removal_recovery: None,
-                                },
-                            )))
-                            .await;
+            context.source.capabilities = activated.capabilities();
+            let result = match operation {
+                PreparedCheckoutOperation::Remove(operation) => {
+                    match preflight_checkout_remove(
+                        &activated,
+                        &mut context.source,
+                        &operation.membership,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = event_tx
+                                .send(AppEvent::ExternalCheckoutRemovePrepared(Box::new(
+                                    ExternalCheckoutRemovePrepared {
+                                        context,
+                                        provider: activated,
+                                        operation,
+                                    },
+                                )))
+                                .await;
+                            return;
+                        }
+                        Err(error) => Err(error),
                     }
                 }
-                return;
-            }
-            let result =
-                run_checkout_operation(&activated, &mut source, request.method, create_destination)
-                    .await;
+                PreparedCheckoutOperation::ReadOrCreate(operation) => {
+                    run_checkout_operation(&activated, &mut context.source, operation).await
+                }
+            };
             let _ = event_tx
-                .send(AppEvent::ExternalCheckoutFinished(Box::new(
-                    ExternalCheckoutResult {
-                        id: request.id,
-                        source,
-                        registry_generation,
-                        mutation,
-                        respond_to,
-                        result,
-                        removal_recovery: None,
-                    },
-                )))
+                .send(context.finished(mutation, result, None))
                 .await;
         });
         true
+    }
+
+    fn prepare_checkout_operation(
+        &mut self,
+        provider: &crate::vcs::ExternalProvider,
+        method: Method,
+    ) -> Result<PreparedCheckoutOperation, (String, String)> {
+        let operation = match method {
+            Method::CheckoutList(_) => CheckoutOperation::List,
+            Method::CheckoutOpen(params) => CheckoutOperation::Open {
+                checkout_id: params.checkout_id,
+                label: params.label,
+                focus: params.focus,
+            },
+            Method::CheckoutCreate(params) => {
+                let destination = checkout_create_destination(provider, &params)?;
+                let checkout_key = crate::worktree::canonical_or_original(&destination);
+                let operation_id = self
+                    .checkout_requests
+                    .reserve_create(checkout_key.clone())
+                    .map_err(|()| {
+                        (
+                            "checkout_operation_in_progress".into(),
+                            "another checkout operation is already in progress for this path"
+                                .into(),
+                        )
+                    })?;
+                CheckoutOperation::Create {
+                    name: params.name,
+                    destination,
+                    label: params.label,
+                    focus: params.focus,
+                    operation_id,
+                    checkout_key,
+                }
+            }
+            Method::CheckoutRemove(params) => {
+                let ws_idx = self
+                    .parse_workspace_id(&params.workspace_id)
+                    .ok_or_else(|| {
+                        (
+                            "workspace_not_found".into(),
+                            "workspace does not exist".into(),
+                        )
+                    })?;
+                let membership = self.state.workspaces[ws_idx]
+                    .checkout_space
+                    .clone()
+                    .ok_or_else(|| {
+                        (
+                            "checkout_not_managed".into(),
+                            "workspace is not an external VCS checkout".into(),
+                        )
+                    })?;
+                if !membership.managed {
+                    return Err((
+                        "checkout_not_managed".into(),
+                        "provider did not mark this checkout as managed".into(),
+                    ));
+                }
+                let checkout_key =
+                    crate::worktree::canonical_or_original(&membership.checkout_path);
+                let operation_id =
+                    self.checkout_requests
+                        .reserve_remove(params.workspace_id.clone(), checkout_key.clone())
+                        .map_err(|()| {
+                            (
+                    "checkout_operation_in_progress".into(),
+                    "another checkout operation is already in progress for this checkout".into(),
+                )
+                        })?;
+                return Ok(PreparedCheckoutOperation::Remove(
+                    ExternalCheckoutRemoveOperation {
+                        membership,
+                        workspace_id: params.workspace_id,
+                        checkout_key,
+                        operation_id,
+                        force: params.force,
+                    },
+                ));
+            }
+            _ => {
+                return Err((
+                    "invalid_request".into(),
+                    "expected a checkout operation".into(),
+                ))
+            }
+        };
+        Ok(PreparedCheckoutOperation::ReadOrCreate(operation))
     }
 
     fn resolve_external_checkout_source(

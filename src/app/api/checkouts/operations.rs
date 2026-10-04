@@ -1,18 +1,66 @@
-use crate::api::schema::{
-    CheckoutCreateParams, CheckoutListParams, CheckoutOpenParams, CheckoutSourceInfo, Method,
-};
+use crate::api::schema::{CheckoutCreateParams, CheckoutSourceInfo};
 use crate::events::{ExternalCheckoutOutcome, ExternalCheckoutSource};
 use crate::vcs::ExactPath;
+
+/// Removal returns to the app thread after preflight; the other operations can
+/// finish entirely in the provider task.
+pub(super) enum PreparedCheckoutOperation {
+    ReadOrCreate(CheckoutOperation),
+    Remove(crate::events::ExternalCheckoutRemoveOperation),
+}
+
+pub(super) enum CheckoutOperation {
+    List,
+    Open {
+        checkout_id: String,
+        label: Option<String>,
+        focus: bool,
+    },
+    Create {
+        name: String,
+        destination: std::path::PathBuf,
+        label: Option<String>,
+        focus: bool,
+        operation_id: u64,
+        checkout_key: std::path::PathBuf,
+    },
+}
+
+impl PreparedCheckoutOperation {
+    pub(super) fn mutation(&self) -> Option<crate::events::ExternalCheckoutMutation> {
+        match self {
+            Self::ReadOrCreate(CheckoutOperation::Create {
+                operation_id,
+                checkout_key,
+                ..
+            }) => Some(crate::events::ExternalCheckoutMutation::Create {
+                operation_id: *operation_id,
+                checkout_key: checkout_key.clone(),
+            }),
+            Self::Remove(operation) => Some(operation.mutation()),
+            Self::ReadOrCreate(CheckoutOperation::List | CheckoutOperation::Open { .. }) => None,
+        }
+    }
+}
+
+impl crate::events::ExternalCheckoutRemoveOperation {
+    pub(super) fn mutation(&self) -> crate::events::ExternalCheckoutMutation {
+        crate::events::ExternalCheckoutMutation::Remove {
+            operation_id: self.operation_id,
+            workspace_id: self.workspace_id.clone(),
+            checkout_key: self.checkout_key.clone(),
+        }
+    }
+}
 
 pub(super) async fn run_checkout_operation(
     provider: &crate::vcs::ActivatedProvider,
     source: &mut ExternalCheckoutSource,
-    method: Method,
-    create_destination: Option<std::path::PathBuf>,
+    operation: CheckoutOperation,
 ) -> Result<ExternalCheckoutOutcome, (String, String)> {
     let root = ExactPath::from_path(&source.repository_root);
-    match method {
-        Method::CheckoutList(CheckoutListParams { .. }) => {
+    match operation {
+        CheckoutOperation::List => {
             let checkouts = provider
                 .checkout_list(root)
                 .await
@@ -20,12 +68,12 @@ pub(super) async fn run_checkout_operation(
             capture_source_checkout(source, &checkouts);
             Ok(ExternalCheckoutOutcome::Listed(checkouts))
         }
-        Method::CheckoutOpen(CheckoutOpenParams {
+        CheckoutOperation::Open {
             checkout_id,
             label,
             focus,
             ..
-        }) => {
+        } => {
             let checkouts = provider
                 .checkout_list(root)
                 .await
@@ -46,14 +94,13 @@ pub(super) async fn run_checkout_operation(
                 focus,
             })
         }
-        Method::CheckoutCreate(CheckoutCreateParams {
+        CheckoutOperation::Create {
             name,
-            destination: _,
+            destination,
             label,
             focus,
             ..
-        }) => {
-            let destination = create_destination.expect("create destination was prepared");
+        } => {
             if provider.supports(crate::vcs::Capability::CheckoutList) {
                 if let Ok(checkouts) = provider.checkout_list(root.clone()).await {
                     capture_source_checkout(source, &checkouts);
@@ -113,8 +160,6 @@ pub(super) async fn run_checkout_operation(
                 focus,
             })
         }
-        Method::CheckoutRemove(_) => unreachable!("checkout removal requires app-thread preflight"),
-        _ => unreachable!("checkout dispatcher received non-checkout method"),
     }
 }
 
@@ -150,12 +195,16 @@ pub(super) async fn preflight_checkout_remove(
 pub(super) async fn execute_checkout_remove(
     provider: &crate::vcs::ActivatedProvider,
     source: &ExternalCheckoutSource,
-    workspace_id: String,
-    membership: crate::workspace::CheckoutSpaceMembership,
-    force: bool,
+    operation: crate::events::ExternalCheckoutRemoveOperation,
     shutdown_panes: Vec<crate::layout::PaneId>,
-    operation_id: u64,
 ) -> Result<ExternalCheckoutOutcome, (String, String)> {
+    let crate::events::ExternalCheckoutRemoveOperation {
+        workspace_id,
+        membership,
+        force,
+        operation_id,
+        ..
+    } = operation;
     let root = ExactPath::from_path(&source.repository_root);
     let remove_result = provider
         .checkout_remove(

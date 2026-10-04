@@ -1,6 +1,6 @@
 use crate::api::schema::{CheckoutInfo, ResponseResult, WorkspaceCloseParams};
 use crate::events::{
-    AppEvent, ExternalCheckoutMutation, ExternalCheckoutOutcome, ExternalCheckoutRemovalRecovery,
+    ExternalCheckoutMutation, ExternalCheckoutOutcome, ExternalCheckoutRemovalRecovery,
     ExternalCheckoutRemovePrepared, ExternalCheckoutResult, ExternalCheckoutSource,
 };
 
@@ -14,29 +14,34 @@ impl App {
         &mut self,
         prepared: ExternalCheckoutRemovePrepared,
     ) {
+        let ExternalCheckoutRemovePrepared {
+            context,
+            provider,
+            operation,
+        } = prepared;
         let operation_matches = self.checkout_requests.matches_remove(
-            prepared.operation_id,
-            &prepared.workspace_id,
-            &prepared.checkout_key,
+            operation.operation_id,
+            &operation.workspace_id,
+            &operation.checkout_key,
         );
         if !operation_matches {
-            let _ = prepared.respond_to.send(encode_error(
-                prepared.id,
+            let _ = context.respond_to.send(encode_error(
+                context.id,
                 "checkout_operation_superseded",
                 "checkout operation is no longer current",
             ));
             return;
         }
 
-        let rejection = if prepared.registry_generation != self.vcs_registry.generation() {
+        let rejection = if context.registry_generation != self.vcs_registry.generation() {
             Some((
                 "vcs_configuration_changed",
                 "VCS configuration changed before checkout removal started; retry the request",
             ))
         } else {
             let workspace_matches = self.state.workspaces.iter().any(|workspace| {
-                workspace.id == prepared.workspace_id
-                    && workspace.checkout_space.as_ref() == Some(&prepared.membership)
+                workspace.id == operation.workspace_id
+                    && workspace.checkout_space.as_ref() == Some(&operation.membership)
             });
             (!workspace_matches).then_some((
                 "checkout_changed",
@@ -45,13 +50,13 @@ impl App {
         };
         if let Some((code, message)) = rejection {
             self.checkout_requests.finish_remove(
-                prepared.operation_id,
-                &prepared.workspace_id,
-                &prepared.checkout_key,
+                operation.operation_id,
+                &operation.workspace_id,
+                &operation.checkout_key,
             );
-            let _ = prepared
+            let _ = context
                 .respond_to
-                .send(encode_error(prepared.id, code, message));
+                .send(encode_error(context.id, code, message));
             return;
         }
 
@@ -59,54 +64,34 @@ impl App {
             .state
             .workspaces
             .iter()
-            .position(|workspace| workspace.id == prepared.workspace_id)
+            .position(|workspace| workspace.id == operation.workspace_id)
         else {
             return;
         };
         let shutdown_panes = self.shutdown_workspace_terminal_runtimes_for_checkout_remove(ws_idx);
         let removal_recovery = ExternalCheckoutRemovalRecovery {
-            path: prepared.membership.checkout_path.clone(),
+            path: operation.membership.checkout_path.clone(),
             shutdown_panes: shutdown_panes.clone(),
-            operation_id: prepared.operation_id,
+            operation_id: operation.operation_id,
         };
-        let mutation = ExternalCheckoutMutation::Remove {
-            operation_id: prepared.operation_id,
-            workspace_id: prepared.workspace_id.clone(),
-            checkout_key: prepared.checkout_key,
-        };
+        let mutation = operation.mutation();
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
-            let result = execute_checkout_remove(
-                &prepared.provider,
-                &prepared.source,
-                prepared.workspace_id,
-                prepared.membership,
-                prepared.force,
-                shutdown_panes,
-                prepared.operation_id,
-            )
-            .await;
+            let result =
+                execute_checkout_remove(&provider, &context.source, operation, shutdown_panes)
+                    .await;
             let _ = event_tx
-                .send(AppEvent::ExternalCheckoutFinished(Box::new(
-                    ExternalCheckoutResult {
-                        id: prepared.id,
-                        source: prepared.source,
-                        registry_generation: prepared.registry_generation,
-                        mutation: Some(mutation),
-                        respond_to: prepared.respond_to,
-                        result,
-                        removal_recovery: Some(removal_recovery),
-                    },
-                )))
+                .send(context.finished(Some(mutation), result, Some(removal_recovery)))
                 .await;
         });
     }
 
     pub(crate) fn handle_external_checkout_finished(&mut self, result: ExternalCheckoutResult) {
-        let configuration_changed = result.registry_generation != self.vcs_registry.generation();
+        let configuration_changed =
+            result.context.registry_generation != self.vcs_registry.generation();
         if configuration_changed && result.mutation.is_none() {
-            let _ = result.respond_to.send(encode_error(
-                result.id,
+            let _ = result.context.respond_to.send(encode_error(
+                result.context.id,
                 "vcs_configuration_changed",
                 "VCS configuration changed while the request was running; retry the request",
             ));
@@ -133,8 +118,8 @@ impl App {
                 }
             });
         if !mutation_matches {
-            let _ = result.respond_to.send(encode_error(
-                result.id,
+            let _ = result.context.respond_to.send(encode_error(
+                result.context.id,
                 "checkout_operation_superseded",
                 "checkout operation is no longer current",
             ));
@@ -157,7 +142,7 @@ impl App {
             self.state.workspaces.iter().any(|workspace| {
                 &workspace.id == workspace_id
                     && workspace.checkout_space.as_ref().is_some_and(|membership| {
-                        membership.provider_id == result.source.provider_id
+                        membership.provider_id == result.context.source.provider_id
                             && crate::worktree::canonical_or_original(&membership.checkout_path)
                                 == *checkout_key
                     })
@@ -204,11 +189,11 @@ impl App {
             }
         }
         let response = match result.result {
-            Err((code, message)) => encode_error(result.id, &code, message),
+            Err((code, message)) => encode_error(result.context.id, &code, message),
             Ok(ExternalCheckoutOutcome::Listed(checkouts)) => encode_success(
-                result.id,
+                result.context.id,
                 ResponseResult::CheckoutList {
-                    source: checkout_source_info(&result.source),
+                    source: checkout_source_info(&result.context.source),
                     checkouts: checkouts
                         .into_iter()
                         .filter_map(|checkout| self.checkout_info(checkout).ok())
@@ -220,8 +205,8 @@ impl App {
                 label,
                 focus,
             }) => self.finish_external_checkout_open(
-                result.id,
-                result.source,
+                result.context.id,
+                result.context.source,
                 checkout,
                 label,
                 focus,
@@ -232,8 +217,8 @@ impl App {
                 label,
                 focus,
             }) => self.finish_external_checkout_open(
-                result.id,
-                result.source,
+                result.context.id,
+                result.context.source,
                 checkout,
                 label,
                 focus,
@@ -262,7 +247,7 @@ impl App {
                     crate::app::checkout_runtime::CheckoutBackendKind::External,
                 );
                 encode_success(
-                    result.id,
+                    result.context.id,
                     ResponseResult::CheckoutRemoved {
                         workspace_id,
                         path: path.display().to_string(),
@@ -271,7 +256,7 @@ impl App {
                 )
             }
         };
-        let _ = result.respond_to.send(response);
+        let _ = result.context.respond_to.send(response);
     }
 
     pub(super) fn finish_external_checkout_open(
