@@ -539,6 +539,31 @@ impl ClientShellState {
         outcome.repaint = true;
     }
 
+    fn open_checkout_selection(
+        &mut self,
+        backend: ClientCheckoutBackend,
+        workspace_id: String,
+        entries: Vec<ClientWorktreeOpenEntry>,
+        empty_message: &str,
+    ) {
+        if entries.is_empty() {
+            self.set_endpoint_error(empty_message);
+            return;
+        }
+        self.overlay = Some(ClientShellOverlay::WorktreeOpen(
+            ClientWorktreeOpenOverlay {
+                backend,
+                source_workspace_id: workspace_id,
+                entries,
+                selected: 0,
+                query: TextEditor::default(),
+                search_focused: false,
+                error: None,
+                opening: false,
+            },
+        ));
+    }
+
     pub(super) fn handle_worktree_endpoint_result(
         &mut self,
         kind: PendingEndpointKind,
@@ -595,22 +620,12 @@ impl ClientShellState {
                         }
                     })
                     .collect::<Vec<_>>();
-                if entries.is_empty() {
-                    self.set_endpoint_error("No Git worktrees found for this repo.");
-                } else {
-                    self.overlay = Some(ClientShellOverlay::WorktreeOpen(
-                        ClientWorktreeOpenOverlay {
-                            backend: ClientCheckoutBackend::GitWorktree,
-                            source_workspace_id: workspace_id,
-                            entries,
-                            selected: 0,
-                            query: TextEditor::default(),
-                            search_focused: false,
-                            error: None,
-                            opening: false,
-                        },
-                    ));
-                }
+                self.open_checkout_selection(
+                    ClientCheckoutBackend::GitWorktree,
+                    workspace_id,
+                    entries,
+                    "No Git worktrees found for this repo.",
+                );
                 true
             }
             (
@@ -655,38 +670,19 @@ impl ClientShellState {
                         label: entry.name,
                     })
                     .collect::<Vec<_>>();
-                if entries.is_empty() {
-                    self.set_endpoint_error("No checkouts found for this repository.");
-                } else {
-                    self.overlay = Some(ClientShellOverlay::WorktreeOpen(
-                        ClientWorktreeOpenOverlay {
-                            backend: ClientCheckoutBackend::ExternalVcs,
-                            source_workspace_id: workspace_id,
-                            entries,
-                            selected: 0,
-                            query: TextEditor::default(),
-                            search_focused: false,
-                            error: None,
-                            opening: false,
-                        },
-                    ));
-                }
+                self.open_checkout_selection(
+                    ClientCheckoutBackend::ExternalVcs,
+                    workspace_id,
+                    entries,
+                    "No checkouts found for this repository.",
+                );
                 true
             }
             (
                 PendingEndpointKind::WorktreeCreate,
                 Ok(ResponseResult::WorktreeCreated { tab, .. }),
-            ) => {
-                self.overlay = None;
-                self.push_endpoint_method(
-                    crate::api::schema::Method::TabFocus(crate::api::schema::TabTarget {
-                        tab_id: tab.tab_id,
-                    }),
-                    outcome,
-                );
-                true
-            }
-            (
+            )
+            | (
                 PendingEndpointKind::CheckoutCreate,
                 Ok(ResponseResult::CheckoutCreated { tab, .. }),
             ) => {
@@ -703,11 +699,8 @@ impl ClientShellState {
             | (
                 PendingEndpointKind::CheckoutRemove { .. },
                 Ok(ResponseResult::CheckoutRemoved { .. }),
-            ) => {
-                self.overlay = None;
-                true
-            }
-            (PendingEndpointKind::WorktreeOpen, Ok(ResponseResult::WorktreeOpened { .. }))
+            )
+            | (PendingEndpointKind::WorktreeOpen, Ok(ResponseResult::WorktreeOpened { .. }))
             | (
                 PendingEndpointKind::WorktreeRemove { .. },
                 Ok(ResponseResult::WorktreeRemoved { .. }),
@@ -715,28 +708,16 @@ impl ClientShellState {
                 self.overlay = None;
                 true
             }
-            (PendingEndpointKind::WorktreeCreate, Err(error)) => {
+            (PendingEndpointKind::WorktreeCreate, Err(error))
+            | (PendingEndpointKind::CheckoutCreate, Err(error)) => {
                 if let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() {
                     create.creating = false;
                     create.error = Some(error.message);
                 }
                 true
             }
-            (PendingEndpointKind::CheckoutCreate, Err(error)) => {
-                if let Some(ClientShellOverlay::WorktreeCreate(create)) = self.overlay.as_mut() {
-                    create.creating = false;
-                    create.error = Some(error.message);
-                }
-                true
-            }
-            (PendingEndpointKind::WorktreeOpen, Err(error)) => {
-                if let Some(ClientShellOverlay::WorktreeOpen(open)) = self.overlay.as_mut() {
-                    open.opening = false;
-                    open.error = Some(error.message);
-                }
-                true
-            }
-            (PendingEndpointKind::CheckoutOpen, Err(error)) => {
+            (PendingEndpointKind::WorktreeOpen, Err(error))
+            | (PendingEndpointKind::CheckoutOpen, Err(error)) => {
                 if let Some(ClientShellOverlay::WorktreeOpen(open)) = self.overlay.as_mut() {
                     open.opening = false;
                     open.error = Some(error.message);
@@ -765,13 +746,6 @@ impl ClientShellState {
                 }
                 true
             }
-            (PendingEndpointKind::CheckoutRemove { .. }, Err(error)) => {
-                if let Some(ClientShellOverlay::WorktreeRemove(remove)) = self.overlay.as_mut() {
-                    remove.removing = false;
-                    remove.error = Some(error.message);
-                }
-                true
-            }
             (PendingEndpointKind::WorktreeRemove { forced: false }, Err(error))
                 if error.code.as_deref() == Some("dirty_worktree_requires_force")
                     || (error.code.as_deref() == Some("worktree_remove_failed")
@@ -784,7 +758,8 @@ impl ClientShellState {
                 }
                 true
             }
-            (PendingEndpointKind::WorktreeRemove { .. }, Err(error)) => {
+            (PendingEndpointKind::WorktreeRemove { .. }, Err(error))
+            | (PendingEndpointKind::CheckoutRemove { .. }, Err(error)) => {
                 if let Some(ClientShellOverlay::WorktreeRemove(remove)) = self.overlay.as_mut() {
                     remove.removing = false;
                     remove.error = Some(error.message);
