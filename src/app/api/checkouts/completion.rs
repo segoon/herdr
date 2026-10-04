@@ -148,33 +148,24 @@ impl App {
                     })
             })
         });
-        if let Some(mutation) = result.mutation.as_ref() {
+        // An unknown outcome keeps its reservation for the rest of this server
+        // process; retrying the mutation could duplicate or destroy a checkout.
+        if let Some(mutation) = result.mutation.as_ref().filter(|_| !outcome_unknown) {
             match mutation {
                 ExternalCheckoutMutation::Create {
                     operation_id,
                     checkout_key,
                 } => {
-                    if outcome_unknown {
-                        self.checkout_requests.mark_outcome_unknown(*operation_id);
-                    } else {
-                        self.checkout_requests
-                            .finish_create(*operation_id, checkout_key);
-                    }
+                    self.checkout_requests
+                        .finish_create(*operation_id, checkout_key);
                 }
                 ExternalCheckoutMutation::Remove {
                     operation_id,
                     workspace_id,
                     checkout_key,
                 } => {
-                    if outcome_unknown {
-                        self.checkout_requests.mark_outcome_unknown(*operation_id);
-                    } else {
-                        self.checkout_requests.finish_remove(
-                            *operation_id,
-                            workspace_id,
-                            checkout_key,
-                        );
-                    }
+                    self.checkout_requests
+                        .finish_remove(*operation_id, workspace_id, checkout_key);
                 }
             }
         }

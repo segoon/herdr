@@ -1,17 +1,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CheckoutRequestState {
-    Running,
-    OutcomeUnknown,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckoutRequest {
     path: PathBuf,
     workspace_id: Option<String>,
-    state: CheckoutRequestState,
 }
 
 /// Owns mutation reservations shared by Git worktrees and external VCS
@@ -53,7 +46,6 @@ impl CheckoutRequests {
             CheckoutRequest {
                 path,
                 workspace_id: None,
-                state: CheckoutRequestState::Running,
             },
         );
         Ok(operation_id)
@@ -76,7 +68,6 @@ impl CheckoutRequests {
             CheckoutRequest {
                 path,
                 workspace_id: Some(workspace_id),
-                state: CheckoutRequestState::Running,
             },
         );
         Ok(operation_id)
@@ -127,21 +118,6 @@ impl CheckoutRequests {
         true
     }
 
-    pub(crate) fn mark_outcome_unknown(&mut self, operation_id: u64) -> bool {
-        let Some(request) = self.operations.get_mut(&operation_id) else {
-            return false;
-        };
-        request.state = CheckoutRequestState::OutcomeUnknown;
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn state(&self, operation_id: u64) -> Option<CheckoutRequestState> {
-        self.operations
-            .get(&operation_id)
-            .map(|request| request.state)
-    }
-
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.operations.is_empty()
@@ -155,7 +131,6 @@ impl CheckoutRequests {
             CheckoutRequest {
                 path,
                 workspace_id: None,
-                state: CheckoutRequestState::Running,
             },
         );
         self.next_id = self.next_id.max(operation_id.saturating_add(1));
@@ -176,7 +151,6 @@ impl CheckoutRequests {
             CheckoutRequest {
                 path,
                 workspace_id: Some(workspace_id),
-                state: CheckoutRequestState::Running,
             },
         );
         self.next_id = self.next_id.max(operation_id.saturating_add(1));
@@ -212,19 +186,5 @@ mod tests {
             .is_err());
         assert!(requests.finish_remove(remove, "workspace", &path));
         assert!(requests.is_empty());
-    }
-
-    #[test]
-    fn unknown_outcome_keeps_the_reservation() {
-        let mut requests = CheckoutRequests::new();
-        let path = PathBuf::from("/checkout");
-        let operation = requests.reserve_create(path.clone()).unwrap();
-
-        assert!(requests.mark_outcome_unknown(operation));
-        assert_eq!(
-            requests.state(operation),
-            Some(CheckoutRequestState::OutcomeUnknown)
-        );
-        assert!(requests.reserve_create(path).is_err());
     }
 }

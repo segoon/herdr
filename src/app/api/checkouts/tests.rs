@@ -397,35 +397,62 @@ fn successful_remove_is_grandfathered_across_config_reload() {
 
 #[test]
 fn unknown_mutation_outcome_keeps_reservation_quarantined() {
-    let mut app = test_app();
-    let path = std::path::PathBuf::from("/repo/topic");
-    let checkout_key = crate::worktree::canonical_or_original(&path);
-    let operation_id = app
-        .checkout_requests
-        .reserve_create(checkout_key.clone())
-        .unwrap();
-    let (respond_to, response_rx) = std::sync::mpsc::channel();
+    for removing in [false, true] {
+        let mut app = test_app();
+        let path = std::path::PathBuf::from("/repo/topic");
+        let checkout_key = crate::worktree::canonical_or_original(&path);
+        let workspace_id = "workspace".to_owned();
+        let mutation = if removing {
+            let operation_id = app
+                .checkout_requests
+                .reserve_remove(workspace_id.clone(), checkout_key.clone())
+                .unwrap();
+            ExternalCheckoutMutation::Remove {
+                operation_id,
+                workspace_id: workspace_id.clone(),
+                checkout_key: checkout_key.clone(),
+            }
+        } else {
+            let operation_id = app
+                .checkout_requests
+                .reserve_create(checkout_key.clone())
+                .unwrap();
+            ExternalCheckoutMutation::Create {
+                operation_id,
+                checkout_key: checkout_key.clone(),
+            }
+        };
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
 
-    app.handle_external_checkout_finished(ExternalCheckoutResult {
-        context: ExternalCheckoutContext {
-            id: "request".into(),
-            source: source(),
-            registry_generation: app.vcs_registry.generation(),
-            respond_to,
-        },
-        mutation: Some(ExternalCheckoutMutation::Create {
-            operation_id,
-            checkout_key: checkout_key.clone(),
-        }),
-        result: Err(("checkout_outcome_unknown".into(), "timed out".into())),
-        removal_recovery: None,
-    });
+        app.handle_external_checkout_finished(ExternalCheckoutResult {
+            context: ExternalCheckoutContext {
+                id: "request".into(),
+                source: source(),
+                registry_generation: app.vcs_registry.generation(),
+                respond_to,
+            },
+            mutation: Some(mutation),
+            result: Err(("checkout_outcome_unknown".into(), "timed out".into())),
+            removal_recovery: None,
+        });
 
-    let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
-    assert_eq!(response.error.code, "checkout_outcome_unknown");
-    assert_eq!(
-        app.checkout_requests.state(operation_id),
-        Some(super::super::checkout_requests::CheckoutRequestState::OutcomeUnknown)
-    );
-    assert!(app.checkout_requests.reserve_create(checkout_key).is_err());
+        let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+        assert_eq!(response.error.code, "checkout_outcome_unknown");
+        assert!(app
+            .checkout_requests
+            .reserve_create(checkout_key.clone())
+            .is_err());
+        assert!(app
+            .checkout_requests
+            .reserve_remove(workspace_id.clone(), checkout_key)
+            .is_err());
+        let other_path = std::path::PathBuf::from("/repo/other");
+        if removing {
+            assert!(app
+                .checkout_requests
+                .reserve_remove(workspace_id, other_path.clone())
+                .is_err());
+        }
+        assert!(app.checkout_requests.reserve_create(other_path).is_ok());
+    }
 }
