@@ -75,180 +75,6 @@ impl ExternalProvider {
         }
     }
 
-    async fn inspect(&self, roots: Vec<ExactPath>) -> Result<Vec<InspectResult>, ProviderFailure> {
-        self.require_allowed(Capability::Inspect)?;
-        if roots.len() > MAX_BATCH_ITEMS {
-            return Err(ProviderFailure::Protocol(format!(
-                "inspect batch exceeds {MAX_BATCH_ITEMS} items"
-            )));
-        }
-        for root in &roots {
-            validate_response_path(root)?;
-        }
-        match self
-            .request(RequestOperation::Inspect { roots }, self.status_timeout)
-            .await?
-        {
-            ResponseOperation::Inspect { items } => {
-                if items.len() > MAX_BATCH_ITEMS {
-                    return Err(ProviderFailure::Protocol(format!(
-                        "inspect response exceeds {MAX_BATCH_ITEMS} items"
-                    )));
-                }
-                let mut seen_roots = HashSet::new();
-                for item in &items {
-                    let root = validate_response_path(&item.root)?;
-                    if !seen_roots.insert(root) {
-                        return Err(ProviderFailure::Protocol(
-                            "inspect response contains a duplicate root".into(),
-                        ));
-                    }
-                    if item
-                        .branch
-                        .as_ref()
-                        .is_some_and(|branch| branch.len() > MAX_STATUS_TEXT_BYTES)
-                    {
-                        return Err(ProviderFailure::Protocol(format!(
-                            "inspect branch exceeds {MAX_STATUS_TEXT_BYTES} bytes"
-                        )));
-                    }
-                }
-                Ok(items)
-            }
-            response => Err(ProviderFailure::Protocol(format!(
-                "provider {} returned {} for inspect",
-                self.id,
-                response.operation_name()
-            ))),
-        }
-    }
-
-    async fn checkout_list(&self, root: ExactPath) -> Result<Vec<Checkout>, ProviderFailure> {
-        self.require_allowed(Capability::CheckoutList)?;
-        validate_response_path(&root)?;
-        match self
-            .request(
-                RequestOperation::CheckoutList { root },
-                self.operation_timeout,
-            )
-            .await?
-        {
-            ResponseOperation::CheckoutList { checkouts } => {
-                if checkouts.len() > MAX_BATCH_ITEMS {
-                    return Err(ProviderFailure::Protocol(format!(
-                        "checkout.list response exceeds {MAX_BATCH_ITEMS} items"
-                    )));
-                }
-                let mut seen_ids = HashSet::new();
-                let mut seen_paths = HashSet::new();
-                for checkout in &checkouts {
-                    let path = validate_checkout(checkout)?;
-                    if !seen_ids.insert(&checkout.id) {
-                        return Err(ProviderFailure::Protocol(
-                            "checkout.list response contains a duplicate checkout id".into(),
-                        ));
-                    }
-                    if !seen_paths.insert(path) {
-                        return Err(ProviderFailure::Protocol(
-                            "checkout.list response contains a duplicate checkout path".into(),
-                        ));
-                    }
-                }
-                Ok(checkouts)
-            }
-            response => Err(ProviderFailure::Protocol(format!(
-                "provider {} returned {} for checkout.list",
-                self.id,
-                response.operation_name()
-            ))),
-        }
-    }
-
-    async fn checkout_create(
-        &self,
-        root: ExactPath,
-        name: String,
-        destination: ExactPath,
-    ) -> Result<Checkout, ProviderFailure> {
-        self.require_allowed(Capability::CheckoutCreate)?;
-        validate_response_path(&root)?;
-        validate_response_path(&destination)?;
-        if name.is_empty() || name.len() > 256 {
-            return Err(ProviderFailure::Protocol(
-                "checkout name must contain 1-256 bytes".into(),
-            ));
-        }
-        match self
-            .request(
-                RequestOperation::CheckoutCreate {
-                    root,
-                    name,
-                    destination,
-                },
-                self.operation_timeout,
-            )
-            .await?
-        {
-            ResponseOperation::CheckoutCreate { checkout } => {
-                validate_checkout(&checkout)?;
-                Ok(checkout)
-            }
-            response => Err(ProviderFailure::Protocol(format!(
-                "provider {} returned {} for checkout.create",
-                self.id,
-                response.operation_name()
-            ))),
-        }
-    }
-
-    async fn checkout_remove(
-        &self,
-        root: ExactPath,
-        checkout: ExactPath,
-        force: bool,
-    ) -> Result<(), ProviderFailure> {
-        validate_response_path(&root)?;
-        validate_response_path(&checkout)?;
-        if force {
-            self.require_allowed(Capability::CheckoutRemove)?;
-        }
-        self.require_allowed(if force {
-            Capability::CheckoutRemoveForce
-        } else {
-            Capability::CheckoutRemove
-        })?;
-        match self
-            .request(
-                RequestOperation::CheckoutRemove {
-                    root,
-                    checkout,
-                    force,
-                },
-                self.operation_timeout,
-            )
-            .await?
-        {
-            ResponseOperation::CheckoutRemove {} => Ok(()),
-            response => Err(ProviderFailure::Protocol(format!(
-                "provider {} returned {} for checkout.remove",
-                self.id,
-                response.operation_name()
-            ))),
-        }
-    }
-
-    fn require_allowed(&self, capability: Capability) -> Result<(), ProviderFailure> {
-        if self.allowed_capabilities.contains(&capability) {
-            Ok(())
-        } else {
-            Err(ProviderFailure::Protocol(format!(
-                "capability {:?} is not allowed for provider {}",
-                capability.as_str(),
-                self.id
-            )))
-        }
-    }
-
     async fn request(
         &self,
         operation: RequestOperation,
@@ -449,7 +275,7 @@ fn is_batch_program(path: &Path) -> bool {
 #[derive(Debug, Clone)]
 pub(crate) struct ActivatedProvider {
     provider: ExternalProvider,
-    pub(crate) effective_capabilities: BTreeSet<Capability>,
+    effective_capabilities: BTreeSet<Capability>,
 }
 
 impl ActivatedProvider {
@@ -478,7 +304,54 @@ impl ActivatedProvider {
         roots: Vec<ExactPath>,
     ) -> Result<Vec<InspectResult>, ProviderFailure> {
         self.require_effective(Capability::Inspect)?;
-        self.provider.inspect(roots).await
+        if roots.len() > MAX_BATCH_ITEMS {
+            return Err(ProviderFailure::Protocol(format!(
+                "inspect batch exceeds {MAX_BATCH_ITEMS} items"
+            )));
+        }
+        for root in &roots {
+            validate_response_path(root)?;
+        }
+        match self
+            .provider
+            .request(
+                RequestOperation::Inspect { roots },
+                self.provider.status_timeout,
+            )
+            .await?
+        {
+            ResponseOperation::Inspect { items } => {
+                if items.len() > MAX_BATCH_ITEMS {
+                    return Err(ProviderFailure::Protocol(format!(
+                        "inspect response exceeds {MAX_BATCH_ITEMS} items"
+                    )));
+                }
+                let mut seen_roots = HashSet::new();
+                for item in &items {
+                    let root = validate_response_path(&item.root)?;
+                    if !seen_roots.insert(root) {
+                        return Err(ProviderFailure::Protocol(
+                            "inspect response contains a duplicate root".into(),
+                        ));
+                    }
+                    if item
+                        .branch
+                        .as_ref()
+                        .is_some_and(|branch| branch.len() > MAX_STATUS_TEXT_BYTES)
+                    {
+                        return Err(ProviderFailure::Protocol(format!(
+                            "inspect branch exceeds {MAX_STATUS_TEXT_BYTES} bytes"
+                        )));
+                    }
+                }
+                Ok(items)
+            }
+            response => Err(ProviderFailure::Protocol(format!(
+                "provider {} returned {} for inspect",
+                self.id(),
+                response.operation_name()
+            ))),
+        }
     }
 
     pub(crate) async fn checkout_list(
@@ -486,7 +359,44 @@ impl ActivatedProvider {
         root: ExactPath,
     ) -> Result<Vec<Checkout>, ProviderFailure> {
         self.require_effective(Capability::CheckoutList)?;
-        self.provider.checkout_list(root).await
+        validate_response_path(&root)?;
+        match self
+            .provider
+            .request(
+                RequestOperation::CheckoutList { root },
+                self.provider.operation_timeout,
+            )
+            .await?
+        {
+            ResponseOperation::CheckoutList { checkouts } => {
+                if checkouts.len() > MAX_BATCH_ITEMS {
+                    return Err(ProviderFailure::Protocol(format!(
+                        "checkout.list response exceeds {MAX_BATCH_ITEMS} items"
+                    )));
+                }
+                let mut seen_ids = HashSet::new();
+                let mut seen_paths = HashSet::new();
+                for checkout in &checkouts {
+                    let path = validate_checkout(checkout)?;
+                    if !seen_ids.insert(&checkout.id) {
+                        return Err(ProviderFailure::Protocol(
+                            "checkout.list response contains a duplicate checkout id".into(),
+                        ));
+                    }
+                    if !seen_paths.insert(path) {
+                        return Err(ProviderFailure::Protocol(
+                            "checkout.list response contains a duplicate checkout path".into(),
+                        ));
+                    }
+                }
+                Ok(checkouts)
+            }
+            response => Err(ProviderFailure::Protocol(format!(
+                "provider {} returned {} for checkout.list",
+                self.id(),
+                response.operation_name()
+            ))),
+        }
     }
 
     pub(crate) async fn checkout_create(
@@ -496,7 +406,35 @@ impl ActivatedProvider {
         destination: ExactPath,
     ) -> Result<Checkout, ProviderFailure> {
         self.require_effective(Capability::CheckoutCreate)?;
-        self.provider.checkout_create(root, name, destination).await
+        validate_response_path(&root)?;
+        validate_response_path(&destination)?;
+        if name.is_empty() || name.len() > 256 {
+            return Err(ProviderFailure::Protocol(
+                "checkout name must contain 1-256 bytes".into(),
+            ));
+        }
+        match self
+            .provider
+            .request(
+                RequestOperation::CheckoutCreate {
+                    root,
+                    name,
+                    destination,
+                },
+                self.provider.operation_timeout,
+            )
+            .await?
+        {
+            ResponseOperation::CheckoutCreate { checkout } => {
+                validate_checkout(&checkout)?;
+                Ok(checkout)
+            }
+            response => Err(ProviderFailure::Protocol(format!(
+                "provider {} returned {} for checkout.create",
+                self.id(),
+                response.operation_name()
+            ))),
+        }
     }
 
     pub(crate) async fn checkout_remove(
@@ -513,7 +451,27 @@ impl ActivatedProvider {
         } else {
             Capability::CheckoutRemove
         })?;
-        self.provider.checkout_remove(root, checkout, force).await
+        validate_response_path(&root)?;
+        validate_response_path(&checkout)?;
+        match self
+            .provider
+            .request(
+                RequestOperation::CheckoutRemove {
+                    root,
+                    checkout,
+                    force,
+                },
+                self.provider.operation_timeout,
+            )
+            .await?
+        {
+            ResponseOperation::CheckoutRemove {} => Ok(()),
+            response => Err(ProviderFailure::Protocol(format!(
+                "provider {} returned {} for checkout.remove",
+                self.id(),
+                response.operation_name()
+            ))),
+        }
     }
 
     fn require_effective(&self, capability: Capability) -> Result<(), ProviderFailure> {
@@ -525,6 +483,97 @@ impl ActivatedProvider {
                 self.provider.id(),
                 capability.as_str()
             )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activated(allowed: &[Capability], advertised: &[&str]) -> ActivatedProvider {
+        let allowed_capabilities = allowed.iter().copied().collect();
+        let effective_capabilities = negotiate_capabilities(
+            &allowed_capabilities,
+            &advertised
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
+        );
+        ActivatedProvider {
+            provider: ExternalProvider {
+                id: "test".into(),
+                display_name: "Test".into(),
+                command: vec!["herdr-test-provider-does-not-exist".into()],
+                priority: 0,
+                markers: Vec::new(),
+                allowed_capabilities,
+                status_timeout: Duration::from_secs(1),
+                operation_timeout: Duration::from_secs(1),
+                config_directory: std::env::temp_dir(),
+                checkout_directory: None,
+                process_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            },
+            effective_capabilities,
+        }
+    }
+
+    fn assert_capability_denied(result: Result<(), ProviderFailure>) {
+        assert!(
+            matches!(result, Err(ProviderFailure::Protocol(ref message))
+            if message.contains("did not negotiate capability")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn operations_require_both_advertisement_and_configuration_before_launch() {
+        let all = [
+            Capability::Inspect,
+            Capability::CheckoutList,
+            Capability::CheckoutCreate,
+            Capability::CheckoutRemove,
+            Capability::CheckoutRemoveForce,
+        ];
+        let advertised = all.map(Capability::as_str);
+        // Each side of negotiation must independently be able to deny execution.
+        for provider in [activated(&all, &[]), activated(&[], &advertised)] {
+            let root = ExactPath::from_path(&std::env::temp_dir());
+            for result in [
+                provider.inspect(vec![root.clone()]).await.map(|_| ()),
+                provider.checkout_list(root.clone()).await.map(|_| ()),
+                provider
+                    .checkout_create(root.clone(), "topic".into(), root.clone())
+                    .await
+                    .map(|_| ()),
+                provider
+                    .checkout_remove(root.clone(), root.clone(), false)
+                    .await,
+                provider.checkout_remove(root.clone(), root, true).await,
+            ] {
+                assert_capability_denied(result);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn force_remove_requires_both_remove_capabilities_before_launch() {
+        let allowed = [
+            Capability::CheckoutList,
+            Capability::CheckoutRemove,
+            Capability::CheckoutRemoveForce,
+        ];
+        let root = ExactPath::from_path(&std::env::temp_dir());
+        for advertised in [
+            ["checkout.list", "checkout.remove"],
+            ["checkout.list", "checkout.remove.force"],
+        ] {
+            let provider = activated(&allowed, &advertised);
+            assert_capability_denied(
+                provider
+                    .checkout_remove(root.clone(), root.clone(), true)
+                    .await,
+            );
         }
     }
 }

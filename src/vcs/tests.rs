@@ -125,14 +125,8 @@ fn capability_negotiation_ignores_unknowns_and_requires_allowlist() {
     let configured = [Capability::Inspect, Capability::CheckoutList]
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let advertised = ["inspect", "checkout.create", "future.capability"]
-        .into_iter()
-        .filter_map(Capability::parse)
-        .collect::<BTreeSet<_>>();
-    let effective = configured
-        .intersection(&advertised)
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let advertised = ["inspect", "checkout.create", "future.capability"].map(str::to_owned);
+    let effective = negotiate_capabilities(&configured, &advertised);
     assert_eq!(effective, [Capability::Inspect].into_iter().collect());
     assert_eq!(Capability::Inspect.as_str(), "inspect");
 }
@@ -310,7 +304,7 @@ printf '{"protocol_version":1,"request_id":%s,"status":"ok","response":{"operati
         .await
         .expect("describe provider");
     assert_eq!(
-        description.effective_capabilities,
+        description.capabilities(),
         [Capability::Inspect].into_iter().collect()
     );
 
