@@ -65,7 +65,6 @@ pub(super) async fn run_checkout_operation(
                 .checkout_list(root)
                 .await
                 .map_err(provider_failure)?;
-            capture_source_checkout(source, &checkouts);
             Ok(ExternalCheckoutOutcome::Listed(checkouts))
         }
         CheckoutOperation::Open {
@@ -165,14 +164,13 @@ pub(super) async fn run_checkout_operation(
 
 pub(super) async fn preflight_checkout_remove(
     provider: &crate::vcs::ActivatedProvider,
-    source: &mut ExternalCheckoutSource,
+    source: &ExternalCheckoutSource,
     membership: &crate::workspace::CheckoutSpaceMembership,
 ) -> Result<(), (String, String)> {
     let listed = provider
         .checkout_list(ExactPath::from_path(&source.repository_root))
         .await
         .map_err(provider_failure)?;
-    capture_source_checkout(source, &listed);
     let valid = listed.iter().any(|checkout| {
         checkout.id == membership.checkout_id
             && checkout.managed

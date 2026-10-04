@@ -101,7 +101,7 @@ impl App {
                 PreparedCheckoutOperation::Remove(operation) => {
                     match preflight_checkout_remove(
                         &activated,
-                        &mut context.source,
+                        &context.source,
                         &operation.membership,
                     )
                     .await
