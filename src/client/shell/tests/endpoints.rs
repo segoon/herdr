@@ -2591,3 +2591,110 @@ fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
         }] if activated == &endpoint_id && workspace_id == "ws_1"
     ));
 }
+
+fn send_optional_projections(
+    state: &mut ClientShellState,
+    generation: u64,
+    boot_id: &str,
+    revision: u64,
+) {
+    state.set_endpoint_agent_view_projection_for_generation(
+        &ClientEndpointId::Local,
+        generation,
+        crate::client::endpoint::DecodedAgentViewProjection {
+            boot_id: boot_id.into(),
+            revision,
+            view: Ok(None),
+        },
+    );
+    state.set_endpoint_vcs_projection(
+        &ClientEndpointId::Local,
+        generation,
+        crate::protocol::endpoint::EndpointVcsProjection {
+            boot_id: boot_id.into(),
+            revision,
+            workspaces: Default::default(),
+        },
+    );
+}
+
+#[test]
+fn optional_projection_ordering_preserves_each_payload_policy() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut local = snapshot();
+    local.revision = 1;
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(local.clone()),
+    );
+    send_optional_projections(&mut state, 1, &local.boot_id, 3);
+    send_optional_projections(&mut state, 1, &local.boot_id, 2);
+    local.revision = 3;
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 1, Box::new(local));
+    let endpoint = state
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id.is_local())
+        .unwrap();
+    assert!(matches!(
+        ClientShellState::endpoint_agent_view(endpoint),
+        Some(Ok(None))
+    ));
+    // VCS keeps the last arrival (revision 2), which cannot accompany snapshot 3.
+    assert!(endpoint.vcs_projection.is_none());
+}
+
+#[test]
+fn optional_projections_follow_snapshot_identity_and_discard_unmatched_pending() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut local = snapshot();
+    local.revision = 2;
+    send_optional_projections(&mut state, 1, &local.boot_id, 2);
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        1,
+        Box::new(local.clone()),
+    );
+    let assert_present = |state: &ClientShellState, present: bool| {
+        let endpoint = state
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id.is_local())
+            .unwrap();
+        assert_eq!(
+            ClientShellState::endpoint_agent_view(endpoint).is_some(),
+            present
+        );
+        assert_eq!(endpoint.vcs_projection.is_some(), present);
+    };
+    assert_present(&state, true);
+    send_optional_projections(&mut state, 1, &local.boot_id, 1);
+    assert_present(&state, true);
+    // A reconnect invalidates values from the previous connection generation.
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        2,
+        Box::new(local.clone()),
+    );
+    assert_present(&state, false);
+    send_optional_projections(&mut state, 2, &local.boot_id, 2);
+    assert_present(&state, true);
+    local.boot_id = "restarted".into();
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        2,
+        Box::new(local.clone()),
+    );
+    assert_present(&state, false);
+    send_optional_projections(&mut state, 2, &local.boot_id, 4);
+    local.revision = 3;
+    state.set_endpoint_snapshot_for_generation(
+        &ClientEndpointId::Local,
+        2,
+        Box::new(local.clone()),
+    );
+    local.revision = 4;
+    state.set_endpoint_snapshot_for_generation(&ClientEndpointId::Local, 2, Box::new(local));
+    assert_present(&state, false);
+}

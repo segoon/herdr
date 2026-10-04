@@ -1,3 +1,4 @@
+use super::projection_sync::{self, ProjectionVersion, ReplacementPolicy, RevisionBound};
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -12,6 +13,37 @@ pub(crate) struct ClientEndpointAgentViewProjection {
 pub(crate) struct ClientEndpointVcsProjection {
     generation: Option<u64>,
     pub(crate) projection: crate::protocol::endpoint::EndpointVcsProjection,
+}
+
+impl RevisionBound for ClientEndpointAgentViewProjection {
+    fn version(&self) -> ProjectionVersion<'_> {
+        ProjectionVersion {
+            generation: self.generation,
+            boot_id: &self.boot_id,
+            revision: self.revision,
+        }
+    }
+}
+
+impl RevisionBound for ClientEndpointVcsProjection {
+    fn version(&self) -> ProjectionVersion<'_> {
+        ProjectionVersion {
+            generation: self.generation,
+            boot_id: &self.projection.boot_id,
+            revision: self.projection.revision,
+        }
+    }
+}
+
+fn snapshot_version(
+    snapshot: Option<&ClientShellSnapshot>,
+    generation: Option<u64>,
+) -> Option<ProjectionVersion<'_>> {
+    snapshot.map(|snapshot| ProjectionVersion {
+        generation,
+        boot_id: &snapshot.boot_id,
+        revision: snapshot.revision,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -361,26 +393,17 @@ impl ClientShellState {
             return;
         };
         let endpoint = &mut self.endpoints[index];
-        if endpoint.snapshot_generation == Some(generation)
-            && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                snapshot.boot_id == projection.boot_id && snapshot.revision > projection.revision
-            })
-        {
+        if !projection_sync::receive(
+            &mut endpoint.vcs_projection,
+            &mut endpoint.pending_vcs_projection,
+            ClientEndpointVcsProjection {
+                generation: Some(generation),
+                projection,
+            },
+            snapshot_version(endpoint.snapshot.as_deref(), endpoint.snapshot_generation),
+            ReplacementPolicy::LastArrival,
+        ) {
             return;
-        }
-        let next = ClientEndpointVcsProjection {
-            generation: Some(generation),
-            projection,
-        };
-        let matches = endpoint.snapshot_generation == next.generation
-            && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                snapshot.boot_id == next.projection.boot_id
-                    && snapshot.revision == next.projection.revision
-            });
-        if matches {
-            endpoint.vcs_projection = Some(next);
-        } else {
-            endpoint.pending_vcs_projection = Some(next);
         }
         self.apply_cached_endpoint_snapshot(endpoint_id);
     }
@@ -389,13 +412,13 @@ impl ClientShellState {
         endpoint: &'a ClientShellEndpoint,
         workspace_id: &str,
     ) -> Option<&'a crate::protocol::endpoint::EndpointWorkspaceVcs> {
-        let snapshot = endpoint.snapshot.as_deref()?;
-        let projection = endpoint.vcs_projection.as_ref()?;
-        (projection.generation == endpoint.snapshot_generation
-            && projection.projection.boot_id == snapshot.boot_id
-            && projection.projection.revision == snapshot.revision)
-            .then(|| projection.projection.workspaces.get(workspace_id))
-            .flatten()
+        projection_sync::matching(
+            &endpoint.vcs_projection,
+            snapshot_version(endpoint.snapshot.as_deref(), endpoint.snapshot_generation),
+        )?
+        .projection
+        .workspaces
+        .get(workspace_id)
     }
 
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
@@ -468,48 +491,28 @@ impl ClientShellState {
         else {
             return;
         };
-        if endpoint.snapshot_generation == generation
-            && endpoint
-                .snapshot
-                .as_deref()
-                .is_some_and(|snapshot| snapshot.boot_id == boot_id && snapshot.revision > revision)
-        {
-            return;
-        }
-        let next = ClientEndpointAgentViewProjection {
-            generation,
-            boot_id,
-            revision,
-            view,
-        };
-        let matches_snapshot = endpoint.snapshot_generation == next.generation
-            && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                snapshot.boot_id == next.boot_id && snapshot.revision == next.revision
-            });
-        let slot = if matches_snapshot {
-            &mut endpoint.agent_view_projection
-        } else {
-            &mut endpoint.pending_agent_view_projection
-        };
-        if slot.as_ref().is_some_and(|current| {
-            current.generation == next.generation
-                && current.boot_id == next.boot_id
-                && current.revision >= next.revision
-        }) {
-            return;
-        }
-        *slot = Some(next);
+        projection_sync::receive(
+            &mut endpoint.agent_view_projection,
+            &mut endpoint.pending_agent_view_projection,
+            ClientEndpointAgentViewProjection {
+                generation,
+                boot_id,
+                revision,
+                view,
+            },
+            snapshot_version(endpoint.snapshot.as_deref(), endpoint.snapshot_generation),
+            ReplacementPolicy::KeepNewest,
+        );
     }
 
     pub(crate) fn endpoint_agent_view(
         endpoint: &ClientShellEndpoint,
     ) -> Option<&Result<Option<crate::api::schema::AgentViewSetParams>, ()>> {
-        let snapshot = endpoint.snapshot.as_deref()?;
-        let projection = endpoint.agent_view_projection.as_ref()?;
-        (projection.generation == endpoint.snapshot_generation
-            && projection.boot_id == snapshot.boot_id
-            && projection.revision == snapshot.revision)
-            .then_some(&projection.view)
+        projection_sync::matching(
+            &endpoint.agent_view_projection,
+            snapshot_version(endpoint.snapshot.as_deref(), endpoint.snapshot_generation),
+        )
+        .map(|projection| &projection.view)
     }
 
     /// A terminal normally starts focused. `None` means this host cannot report focus events,
@@ -684,61 +687,22 @@ impl ClientShellState {
         let endpoint = &mut self.endpoints[index];
         endpoint.agent_recency = recency;
         endpoint.snapshot_generation = generation;
+        let version = ProjectionVersion {
+            generation,
+            boot_id: &snapshot.boot_id,
+            revision: snapshot.revision,
+        };
+        projection_sync::synchronize(
+            &mut endpoint.agent_view_projection,
+            &mut endpoint.pending_agent_view_projection,
+            version,
+        );
+        projection_sync::synchronize(
+            &mut endpoint.vcs_projection,
+            &mut endpoint.pending_vcs_projection,
+            version,
+        );
         endpoint.snapshot = Some(snapshot);
-        let pending_matches =
-            endpoint
-                .pending_agent_view_projection
-                .as_ref()
-                .is_some_and(|projection| {
-                    projection.generation == generation
-                        && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                            projection.boot_id == snapshot.boot_id
-                                && projection.revision == snapshot.revision
-                        })
-                });
-        if pending_matches {
-            endpoint.agent_view_projection = endpoint.pending_agent_view_projection.take();
-        } else {
-            endpoint.pending_agent_view_projection = None;
-            if endpoint
-                .agent_view_projection
-                .as_ref()
-                .is_some_and(|projection| {
-                    projection.generation != generation
-                        || endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                            projection.boot_id != snapshot.boot_id
-                                || projection.revision != snapshot.revision
-                        })
-                })
-            {
-                endpoint.agent_view_projection = None;
-            }
-        }
-        let pending_vcs_matches =
-            endpoint
-                .pending_vcs_projection
-                .as_ref()
-                .is_some_and(|projection| {
-                    projection.generation == generation
-                        && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                            projection.projection.boot_id == snapshot.boot_id
-                                && projection.projection.revision == snapshot.revision
-                        })
-                });
-        if pending_vcs_matches {
-            endpoint.vcs_projection = endpoint.pending_vcs_projection.take();
-        } else {
-            endpoint.pending_vcs_projection = None;
-            if endpoint.vcs_projection.as_ref().is_some_and(|projection| {
-                projection.generation != generation
-                    || endpoint.snapshot.as_deref().is_some_and(|snapshot| {
-                        projection.projection.boot_id != snapshot.boot_id
-                            || projection.projection.revision != snapshot.revision
-                    })
-            }) {
-                endpoint.vcs_projection = None;
-            }
-        }
     }
 
     pub(crate) fn acknowledge_active_surface_agents(&mut self, surface: &PaneSurfaceFrame) -> bool {
@@ -810,15 +774,12 @@ fn endpoint_presentation_snapshot(
     endpoint: &ClientShellEndpoint,
 ) -> Option<Box<ClientShellSnapshot>> {
     let mut snapshot = endpoint.snapshot.clone()?;
-    let Some(projection) = endpoint.vcs_projection.as_ref() else {
+    let Some(projection) = projection_sync::matching(
+        &endpoint.vcs_projection,
+        snapshot_version(endpoint.snapshot.as_deref(), endpoint.snapshot_generation),
+    ) else {
         return Some(snapshot);
     };
-    if projection.generation != endpoint.snapshot_generation
-        || projection.projection.boot_id != snapshot.boot_id
-        || projection.projection.revision != snapshot.revision
-    {
-        return Some(snapshot);
-    }
     for workspace in &mut snapshot.workspaces {
         let Some(vcs) = projection
             .projection
