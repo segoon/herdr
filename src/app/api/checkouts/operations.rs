@@ -123,13 +123,7 @@ pub(super) async fn run_checkout_operation(
                             )
                         })?
                         .into_iter()
-                        .find(|checkout| {
-                            checkout
-                                .path
-                                .to_path_buf()
-                                .ok()
-                                .is_some_and(|path| same_checkout_path(&path, &destination))
-                        })
+                        .find(|checkout| same_checkout_path(&checkout.path, &destination))
                         .ok_or_else(|| {
                             (
                                 "checkout_outcome_unknown".into(),
@@ -141,13 +135,7 @@ pub(super) async fn run_checkout_operation(
                 }
                 Err(error) => return Err(provider_failure(error)),
             };
-            let returned_path = checkout.path.to_path_buf().map_err(|message| {
-                (
-                    "checkout_outcome_unknown".into(),
-                    format!("provider reported success with an invalid checkout path: {message}"),
-                )
-            })?;
-            if !same_checkout_path(&returned_path, &destination) {
+            if !same_checkout_path(&checkout.path, &destination) {
                 return Err((
                     "checkout_outcome_unknown".into(),
                     "provider reported success for a checkout path different from the requested destination; the mutation result requires manual reconciliation".into(),
@@ -174,11 +162,7 @@ pub(super) async fn preflight_checkout_remove(
     let valid = listed.iter().any(|checkout| {
         checkout.id == membership.checkout_id
             && checkout.managed
-            && checkout
-                .path
-                .to_path_buf()
-                .ok()
-                .is_some_and(|path| same_checkout_path(&path, &membership.checkout_path))
+            && same_checkout_path(&checkout.path, &membership.checkout_path)
     });
     if valid {
         Ok(())
@@ -265,7 +249,7 @@ fn capture_source_checkout(
     source.source_checkout = checkouts
         .iter()
         .filter_map(|checkout| {
-            let path = crate::worktree::canonical_or_original(&checkout.path.to_path_buf().ok()?);
+            let path = crate::worktree::canonical_or_original(&checkout.path);
             let source_cwd = crate::worktree::canonical_or_original(&source.source_cwd);
             source_cwd
                 .starts_with(&path)

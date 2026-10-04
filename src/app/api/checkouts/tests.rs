@@ -4,7 +4,6 @@ use crate::events::{
     AppEvent, ExternalCheckoutContext, ExternalCheckoutMutation, ExternalCheckoutOutcome,
     ExternalCheckoutRemovalRecovery, ExternalCheckoutResult, ExternalCheckoutSource,
 };
-use crate::vcs::ExactPath;
 use crate::workspace::{CheckoutSpaceMembership, Workspace};
 
 use crate::app::App;
@@ -60,7 +59,7 @@ async fn external_checkout_open_creates_then_reuses_workspace() {
     let checkout = crate::vcs::Checkout {
         id: "topic-id".into(),
         name: "topic".into(),
-        path: ExactPath::from_path(&checkout_path),
+        path: checkout_path.clone(),
         managed: true,
     };
 

@@ -11,7 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
     discovery::Marker,
-    protocol::{RequestOperation, ResponseOperation, WireRequest, WireResponse, WireResult},
+    protocol::{
+        RequestOperation, ResponseOperation, WireCheckout, WireInspectResult, WireRequest,
+        WireResponse, WireResult,
+    },
     Capability, Checkout, ExactPath, InspectResult, ProviderFailure,
 };
 
@@ -223,7 +226,7 @@ fn validate_response_path(path: &ExactPath) -> Result<PathBuf, ProviderFailure> 
     }
 }
 
-fn validate_checkout(checkout: &Checkout) -> Result<PathBuf, ProviderFailure> {
+fn normalize_checkout(checkout: WireCheckout) -> Result<Checkout, ProviderFailure> {
     if checkout.id.is_empty() || checkout.id.len() > 512 {
         return Err(ProviderFailure::Protocol(
             "checkout id must contain 1-512 bytes".into(),
@@ -234,7 +237,76 @@ fn validate_checkout(checkout: &Checkout) -> Result<PathBuf, ProviderFailure> {
             "checkout name must contain 1-256 bytes".into(),
         ));
     }
-    validate_response_path(&checkout.path)
+    let path = validate_response_path(&checkout.path)?;
+    Ok(Checkout {
+        id: checkout.id,
+        name: checkout.name,
+        path,
+        managed: checkout.managed,
+    })
+}
+
+fn normalize_inspection(
+    items: Vec<WireInspectResult>,
+) -> Result<Vec<InspectResult>, ProviderFailure> {
+    if items.len() > MAX_BATCH_ITEMS {
+        return Err(ProviderFailure::Protocol(format!(
+            "inspect response exceeds {MAX_BATCH_ITEMS} items"
+        )));
+    }
+    let mut seen_roots = HashSet::new();
+    let mut normalized = Vec::with_capacity(items.len());
+    for item in items {
+        let root = validate_response_path(&item.root)?;
+        if !seen_roots.insert(root.clone()) {
+            return Err(ProviderFailure::Protocol(
+                "inspect response contains a duplicate root".into(),
+            ));
+        }
+        if item
+            .branch
+            .as_ref()
+            .is_some_and(|branch| branch.len() > MAX_STATUS_TEXT_BYTES)
+        {
+            return Err(ProviderFailure::Protocol(format!(
+                "inspect branch exceeds {MAX_STATUS_TEXT_BYTES} bytes"
+            )));
+        }
+        normalized.push(InspectResult {
+            root,
+            branch: item.branch,
+            ahead: item.ahead,
+            behind: item.behind,
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_checkouts(checkouts: Vec<WireCheckout>) -> Result<Vec<Checkout>, ProviderFailure> {
+    if checkouts.len() > MAX_BATCH_ITEMS {
+        return Err(ProviderFailure::Protocol(format!(
+            "checkout.list response exceeds {MAX_BATCH_ITEMS} items"
+        )));
+    }
+    let checkouts = checkouts
+        .into_iter()
+        .map(normalize_checkout)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen_ids = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    for checkout in &checkouts {
+        if !seen_ids.insert(&checkout.id) {
+            return Err(ProviderFailure::Protocol(
+                "checkout.list response contains a duplicate checkout id".into(),
+            ));
+        }
+        if !seen_paths.insert(&checkout.path) {
+            return Err(ProviderFailure::Protocol(
+                "checkout.list response contains a duplicate checkout path".into(),
+            ));
+        }
+    }
+    Ok(checkouts)
 }
 
 async fn read_capped<R>(reader: R, limit: usize) -> Result<Vec<u8>, ProviderFailure>
@@ -320,32 +392,7 @@ impl ActivatedProvider {
             )
             .await?
         {
-            ResponseOperation::Inspect { items } => {
-                if items.len() > MAX_BATCH_ITEMS {
-                    return Err(ProviderFailure::Protocol(format!(
-                        "inspect response exceeds {MAX_BATCH_ITEMS} items"
-                    )));
-                }
-                let mut seen_roots = HashSet::new();
-                for item in &items {
-                    let root = validate_response_path(&item.root)?;
-                    if !seen_roots.insert(root) {
-                        return Err(ProviderFailure::Protocol(
-                            "inspect response contains a duplicate root".into(),
-                        ));
-                    }
-                    if item
-                        .branch
-                        .as_ref()
-                        .is_some_and(|branch| branch.len() > MAX_STATUS_TEXT_BYTES)
-                    {
-                        return Err(ProviderFailure::Protocol(format!(
-                            "inspect branch exceeds {MAX_STATUS_TEXT_BYTES} bytes"
-                        )));
-                    }
-                }
-                Ok(items)
-            }
+            ResponseOperation::Inspect { items } => normalize_inspection(items),
             response => Err(ProviderFailure::Protocol(format!(
                 "provider {} returned {} for inspect",
                 self.id(),
@@ -368,29 +415,7 @@ impl ActivatedProvider {
             )
             .await?
         {
-            ResponseOperation::CheckoutList { checkouts } => {
-                if checkouts.len() > MAX_BATCH_ITEMS {
-                    return Err(ProviderFailure::Protocol(format!(
-                        "checkout.list response exceeds {MAX_BATCH_ITEMS} items"
-                    )));
-                }
-                let mut seen_ids = HashSet::new();
-                let mut seen_paths = HashSet::new();
-                for checkout in &checkouts {
-                    let path = validate_checkout(checkout)?;
-                    if !seen_ids.insert(&checkout.id) {
-                        return Err(ProviderFailure::Protocol(
-                            "checkout.list response contains a duplicate checkout id".into(),
-                        ));
-                    }
-                    if !seen_paths.insert(path) {
-                        return Err(ProviderFailure::Protocol(
-                            "checkout.list response contains a duplicate checkout path".into(),
-                        ));
-                    }
-                }
-                Ok(checkouts)
-            }
+            ResponseOperation::CheckoutList { checkouts } => normalize_checkouts(checkouts),
             response => Err(ProviderFailure::Protocol(format!(
                 "provider {} returned {} for checkout.list",
                 self.id(),
@@ -425,10 +450,7 @@ impl ActivatedProvider {
             )
             .await?
         {
-            ResponseOperation::CheckoutCreate { checkout } => {
-                validate_checkout(&checkout)?;
-                Ok(checkout)
-            }
+            ResponseOperation::CheckoutCreate { checkout } => normalize_checkout(checkout),
             response => Err(ProviderFailure::Protocol(format!(
                 "provider {} returned {} for checkout.create",
                 self.id(),
@@ -490,6 +512,43 @@ impl ActivatedProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalization_rejects_ambiguous_or_invalid_provider_paths() {
+        let root = std::env::temp_dir().join("herdr-provider-normalization");
+        let checkout = |id: &str, path: &Path| WireCheckout {
+            id: id.into(),
+            name: "topic".into(),
+            path: ExactPath::from_path(path),
+            managed: true,
+        };
+        let normalized = normalize_checkout(checkout("one", &root)).unwrap();
+        assert_eq!(normalized.path, root);
+        assert!(normalize_checkout(checkout("one", Path::new("relative"))).is_err());
+        assert!(normalize_checkouts(vec![checkout("one", &root), checkout("two", &root)]).is_err());
+        assert!(normalize_checkouts(vec![
+            checkout("one", &root),
+            checkout("one", &root.join("other"))
+        ])
+        .is_err());
+        let inspection = || WireInspectResult {
+            root: ExactPath::from_path(&root),
+            branch: Some("topic".into()),
+            ahead: Some(2),
+            behind: Some(3),
+        };
+        assert!(normalize_inspection(vec![inspection(), inspection()]).is_err());
+        let normalized = normalize_inspection(vec![inspection()]).unwrap().remove(0);
+        assert_eq!(normalized.root, root);
+        assert_eq!(
+            (
+                normalized.branch.as_deref(),
+                normalized.ahead,
+                normalized.behind
+            ),
+            (Some("topic"), Some(2), Some(3))
+        );
+    }
 
     fn activated(allowed: &[Capability], advertised: &[&str]) -> ActivatedProvider {
         let allowed_capabilities = allowed.iter().copied().collect();

@@ -310,10 +310,8 @@ async fn refresh_provider_group(
                 }
             };
             for item in items {
-                if let Ok(root) = item.root.to_path_buf() {
-                    if chunk.contains(&root) && !status.contains_key(&root) {
-                        status.insert(root, (item.branch, item.ahead, item.behind));
-                    }
+                if chunk.contains(&item.root) && !status.contains_key(&item.root) {
+                    status.insert(item.root, (item.branch, item.ahead, item.behind));
                 }
             }
         }

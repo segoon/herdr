@@ -187,7 +187,7 @@ impl App {
                     source: checkout_source_info(&result.context.source),
                     checkouts: checkouts
                         .into_iter()
-                        .filter_map(|checkout| self.checkout_info(checkout).ok())
+                        .map(|checkout| self.checkout_info(checkout))
                         .collect(),
                 },
             ),
@@ -259,13 +259,7 @@ impl App {
         focus: bool,
         created: bool,
     ) -> String {
-        let Ok(path) = checkout.path.to_path_buf() else {
-            return encode_error(
-                id,
-                "invalid_provider_response",
-                "provider returned an invalid checkout path",
-            );
-        };
+        let path = checkout.path.clone();
         let already = self.open_workspace_idx_for_external_checkout(&path);
         let candidate = already.map(|index| CheckoutWorkspaceCandidate {
             index,
@@ -297,7 +291,7 @@ impl App {
                                 .map(|checkout| checkout.name.clone())
                                 .unwrap_or_else(|| "source".into()),
                             checkout_path: source_checkout
-                                .and_then(|checkout| checkout.path.to_path_buf().ok())
+                                .map(|checkout| checkout.path.clone())
                                 .unwrap_or_else(|| source.repository_root.clone()),
                             managed: source_checkout.is_some_and(|checkout| checkout.managed),
                             source_workspace_id: None,
@@ -323,13 +317,7 @@ impl App {
         self.finalize_checkout_workspace_open(opened);
         self.external_vcs_identity_refresh_requested = true;
         self.mark_external_vcs_refresh_due(std::time::Instant::now());
-        let info = self.checkout_info(checkout).unwrap_or(CheckoutInfo {
-            id: String::new(),
-            name: path.display().to_string(),
-            path: path.display().to_string(),
-            managed: false,
-            open_workspace_id: Some(self.public_workspace_id(opened.index)),
-        });
+        let info = self.checkout_info(checkout);
         let records = self.checkout_workspace_records(opened.index);
         let payload = if created {
             ResponseResult::CheckoutCreated {
@@ -350,8 +338,8 @@ impl App {
         encode_success(id, payload)
     }
 
-    fn checkout_info(&self, checkout: crate::vcs::Checkout) -> Result<CheckoutInfo, String> {
-        let path = checkout.path.to_path_buf()?;
+    fn checkout_info(&self, checkout: crate::vcs::Checkout) -> CheckoutInfo {
+        let path = checkout.path;
         let canonical = crate::worktree::canonical_or_original(&path);
         let open_workspace_id = self
             .state
@@ -363,12 +351,12 @@ impl App {
                 })
             })
             .map(|index| self.public_workspace_id(index));
-        Ok(CheckoutInfo {
+        CheckoutInfo {
             id: checkout.id,
             name: checkout.name,
             path: path.display().to_string(),
             managed: checkout.managed,
             open_workspace_id,
-        })
+        }
     }
 }

@@ -56,11 +56,11 @@ pub(super) enum ResponseOperation {
     #[serde(rename = "describe")]
     Describe { capabilities: Vec<String> },
     #[serde(rename = "inspect")]
-    Inspect { items: Vec<InspectResult> },
+    Inspect { items: Vec<WireInspectResult> },
     #[serde(rename = "checkout.list")]
-    CheckoutList { checkouts: Vec<Checkout> },
+    CheckoutList { checkouts: Vec<WireCheckout> },
     #[serde(rename = "checkout.create")]
-    CheckoutCreate { checkout: Checkout },
+    CheckoutCreate { checkout: WireCheckout },
     #[serde(rename = "checkout.remove")]
     CheckoutRemove {},
 }
@@ -78,7 +78,7 @@ impl ResponseOperation {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct InspectResult {
+pub(super) struct WireInspectResult {
     pub(crate) root: ExactPath,
     #[serde(default)]
     pub(crate) branch: Option<String>,
@@ -89,7 +89,7 @@ pub(crate) struct InspectResult {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Checkout {
+pub(super) struct WireCheckout {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) path: ExactPath,
