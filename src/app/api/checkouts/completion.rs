@@ -1,7 +1,7 @@
 use crate::api::schema::{CheckoutInfo, ResponseResult, WorkspaceCloseParams};
 use crate::events::{
-    ExternalCheckoutCompletion, ExternalCheckoutOutcome, ExternalCheckoutRemovePrepared,
-    ExternalCheckoutResult, ExternalCheckoutSource,
+    ExternalCheckoutCompletion, ExternalCheckoutFailure, ExternalCheckoutOutcome,
+    ExternalCheckoutRemovePrepared, ExternalCheckoutResult, ExternalCheckoutSource,
 };
 
 use super::super::responses::{encode_error, encode_success};
@@ -74,7 +74,7 @@ impl App {
             let result = execute_checkout_remove(&provider, &context.source, &operation).await;
             let _ = event_tx
                 .send(context.finished(ExternalCheckoutCompletion::Remove {
-                    operation,
+                    operation: Box::new(operation),
                     shutdown_panes,
                     result,
                 }))
@@ -104,15 +104,15 @@ impl App {
                         "checkout operation is no longer current",
                     )
                 } else {
-                    let outcome_unknown = result
-                        .as_ref()
-                        .is_err_and(|(code, _)| code == "checkout_outcome_unknown");
+                    let outcome_unknown = result.as_ref().is_err_and(|error| {
+                        matches!(error, ExternalCheckoutFailure::OutcomeUnknown(_))
+                    });
                     if let Some(creation) = creation.filter(|_| !outcome_unknown) {
                         self.checkout_requests
                             .finish_create(creation.operation_id, &creation.checkout_key);
                     }
                     match result {
-                        Err((code, message)) => encode_error(context.id, &code, message),
+                        Err(error) => error.into_response(context.id),
                         Ok(ExternalCheckoutOutcome::Listed(checkouts)) => encode_success(
                             context.id,
                             ResponseResult::CheckoutList {
@@ -166,9 +166,9 @@ impl App {
                         "checkout operation is no longer current",
                     )
                 } else {
-                    let outcome_unknown = result
-                        .as_ref()
-                        .is_err_and(|(code, _)| code == "checkout_outcome_unknown");
+                    let outcome_unknown = result.as_ref().is_err_and(|error| {
+                        matches!(error, ExternalCheckoutFailure::OutcomeUnknown(_))
+                    });
                     // Uncertain mutations keep their reservation until server restart.
                     if !outcome_unknown {
                         self.checkout_requests.finish_remove(
@@ -204,7 +204,7 @@ impl App {
                         );
                     }
                     match result {
-                        Err((code, message)) => encode_error(context.id, &code, message),
+                        Err(error) => error.into_response(context.id),
                         Ok(()) => encode_success(
                             context.id,
                             ResponseResult::CheckoutRemoved {

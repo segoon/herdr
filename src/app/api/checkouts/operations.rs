@@ -1,5 +1,5 @@
 use crate::api::schema::{CheckoutCreateParams, CheckoutSourceInfo};
-use crate::events::{ExternalCheckoutOutcome, ExternalCheckoutSource};
+use crate::events::{ExternalCheckoutFailure, ExternalCheckoutOutcome, ExternalCheckoutSource};
 use crate::vcs::ExactPath;
 
 /// Removal returns to the app thread after preflight; the other operations can
@@ -29,11 +29,11 @@ pub(super) enum CheckoutOperation {
 impl PreparedCheckoutOperation {
     pub(super) fn failed(
         self,
-        error: (String, String),
+        error: ExternalCheckoutFailure,
     ) -> crate::events::ExternalCheckoutCompletion {
         match self {
             Self::Remove(operation) => crate::events::ExternalCheckoutCompletion::Remove {
-                operation,
+                operation: Box::new(operation),
                 shutdown_panes: Vec::new(),
                 result: Err(error),
             },
@@ -67,14 +67,14 @@ pub(super) async fn run_checkout_operation(
     provider: &crate::vcs::ActivatedProvider,
     source: &mut ExternalCheckoutSource,
     operation: CheckoutOperation,
-) -> Result<ExternalCheckoutOutcome, (String, String)> {
+) -> Result<ExternalCheckoutOutcome, ExternalCheckoutFailure> {
     let root = ExactPath::from_path(&source.repository_root);
     match operation {
         CheckoutOperation::List => {
             let checkouts = provider
                 .checkout_list(root)
                 .await
-                .map_err(provider_failure)?;
+                .map_err(ExternalCheckoutFailure::Provider)?;
             Ok(ExternalCheckoutOutcome::Listed(checkouts))
         }
         CheckoutOperation::Open {
@@ -86,17 +86,12 @@ pub(super) async fn run_checkout_operation(
             let checkouts = provider
                 .checkout_list(root)
                 .await
-                .map_err(provider_failure)?;
+                .map_err(ExternalCheckoutFailure::Provider)?;
             capture_source_checkout(source, &checkouts);
             let checkout = checkouts
                 .into_iter()
                 .find(|checkout| checkout.id == checkout_id)
-                .ok_or_else(|| {
-                    (
-                        "checkout_not_found".into(),
-                        "checkout changed; list and retry".into(),
-                    )
-                })?;
+                .ok_or(ExternalCheckoutFailure::NotFound)?;
             Ok(ExternalCheckoutOutcome::Opened {
                 checkout,
                 label,
@@ -125,29 +120,22 @@ pub(super) async fn run_checkout_operation(
                         .checkout_list(root)
                         .await
                         .map_err(|reconcile_error| {
-                            (
-                                "checkout_outcome_unknown".into(),
-                                format!(
+                            ExternalCheckoutFailure::OutcomeUnknown(format!(
                                     "checkout creation timed out and could not be reconciled: {reconcile_error}"
-                                ),
-                            )
+                                ))
                         })?
                         .into_iter()
                         .find(|checkout| same_checkout_path(&checkout.path, &destination))
                         .ok_or_else(|| {
-                            (
-                                "checkout_outcome_unknown".into(),
-                                format!(
+                            ExternalCheckoutFailure::OutcomeUnknown(format!(
                                     "checkout creation timed out and the destination was not reported during reconciliation: {error}"
-                                ),
-                            )
+                                ))
                         })?
                 }
-                Err(error) => return Err(provider_failure(error)),
+                Err(error) => return Err(ExternalCheckoutFailure::Provider(error)),
             };
             if !same_checkout_path(&checkout.path, &destination) {
-                return Err((
-                    "checkout_outcome_unknown".into(),
+                return Err(ExternalCheckoutFailure::OutcomeUnknown(
                     "provider reported success for a checkout path different from the requested destination; the mutation result requires manual reconciliation".into(),
                 ));
             }
@@ -164,11 +152,11 @@ pub(super) async fn preflight_checkout_remove(
     provider: &crate::vcs::ActivatedProvider,
     source: &ExternalCheckoutSource,
     membership: &crate::workspace::CheckoutSpaceMembership,
-) -> Result<(), (String, String)> {
+) -> Result<(), ExternalCheckoutFailure> {
     let listed = provider
         .checkout_list(ExactPath::from_path(&source.repository_root))
         .await
-        .map_err(provider_failure)?;
+        .map_err(ExternalCheckoutFailure::Provider)?;
     let valid = listed.iter().any(|checkout| {
         checkout.id == membership.checkout_id
             && checkout.managed
@@ -177,10 +165,7 @@ pub(super) async fn preflight_checkout_remove(
     if valid {
         Ok(())
     } else {
-        Err((
-            "checkout_not_managed".into(),
-            "provider no longer reports this checkout as managed".into(),
-        ))
+        Err(ExternalCheckoutFailure::NotManaged)
     }
 }
 
@@ -188,7 +173,7 @@ pub(super) async fn execute_checkout_remove(
     provider: &crate::vcs::ActivatedProvider,
     source: &ExternalCheckoutSource,
     operation: &crate::events::ExternalCheckoutRemoveOperation,
-) -> Result<(), (String, String)> {
+) -> Result<(), ExternalCheckoutFailure> {
     let crate::events::ExternalCheckoutRemoveOperation {
         membership, force, ..
     } = operation;
@@ -208,37 +193,21 @@ pub(super) async fn execute_checkout_remove(
                         .iter()
                         .any(|checkout| checkout.id == membership.checkout_id) => {}
                 Ok(_) => {
-                    return Err((
-                        "checkout_outcome_unknown".into(),
-                        format!(
+                    return Err(ExternalCheckoutFailure::OutcomeUnknown(format!(
                             "checkout removal timed out and the checkout is still reported during reconciliation: {error}"
-                        ),
-                    ));
+                        )));
                 }
                 Err(reconcile_error) => {
-                    return Err((
-                        "checkout_outcome_unknown".into(),
-                        format!(
-                            "checkout removal timed out and could not be reconciled: {reconcile_error}"
-                        ),
-                    ));
+                    return Err(ExternalCheckoutFailure::OutcomeUnknown(format!(
+                        "checkout removal timed out and could not be reconciled: {reconcile_error}"
+                    )));
                 }
             }
         } else {
-            return Err(provider_failure(error));
+            return Err(ExternalCheckoutFailure::Provider(error));
         }
     }
     Ok(())
-}
-
-fn provider_failure(error: crate::vcs::ProviderFailure) -> (String, String) {
-    match &error {
-        crate::vcs::ProviderFailure::Provider(provider) if provider.code == "checkout_dirty" => (
-            "dirty_checkout_requires_force".into(),
-            provider.message.clone(),
-        ),
-        _ => ("vcs_operation_failed".into(), error.to_string()),
-    }
 }
 
 fn capture_source_checkout(

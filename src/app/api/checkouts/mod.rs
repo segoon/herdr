@@ -3,8 +3,9 @@ mod operations;
 
 use crate::api::schema::{Method, Request};
 use crate::events::{
-    AppEvent, ExternalCheckoutCompletion, ExternalCheckoutContext, ExternalCheckoutRemoveOperation,
-    ExternalCheckoutRemovePrepared, ExternalCheckoutResult, ExternalCheckoutSource,
+    AppEvent, ExternalCheckoutCompletion, ExternalCheckoutContext, ExternalCheckoutFailure,
+    ExternalCheckoutRemoveOperation, ExternalCheckoutRemovePrepared, ExternalCheckoutResult,
+    ExternalCheckoutSource,
 };
 
 use self::operations::{
@@ -20,6 +21,29 @@ impl ExternalCheckoutContext {
             context: self,
             completion,
         }))
+    }
+}
+
+impl ExternalCheckoutFailure {
+    fn into_response(self, id: String) -> String {
+        use crate::vcs::ProviderFailure;
+        let (code, message) = match self {
+            Self::Activation(error) => ("vcs_provider_failed", error.to_string()),
+            Self::Provider(ProviderFailure::Provider(error)) if error.code == "checkout_dirty" => {
+                ("dirty_checkout_requires_force", error.message)
+            }
+            Self::Provider(error) => ("vcs_operation_failed", error.to_string()),
+            Self::OutcomeUnknown(message) => ("checkout_outcome_unknown", message),
+            Self::NotFound => (
+                "checkout_not_found",
+                "checkout changed; list and retry".into(),
+            ),
+            Self::NotManaged => (
+                "checkout_not_managed",
+                "provider no longer reports this checkout as managed".into(),
+            ),
+        };
+        encode_error(id, code, message)
     }
 }
 
@@ -77,11 +101,12 @@ impl App {
             let activated = match activated {
                 Ok(activated) => activated,
                 Err(error) => {
-                    let _ = event_tx
-                        .send(context.finished(
-                            operation.failed(("vcs_provider_failed".into(), error.to_string())),
-                        ))
-                        .await;
+                    let _ =
+                        event_tx
+                            .send(context.finished(
+                                operation.failed(ExternalCheckoutFailure::Activation(error)),
+                            ))
+                            .await;
                     return;
                 }
             };
@@ -108,7 +133,7 @@ impl App {
                             return;
                         }
                         Err(error) => ExternalCheckoutCompletion::Remove {
-                            operation,
+                            operation: Box::new(operation),
                             shutdown_panes: Vec::new(),
                             result: Err(error),
                         },

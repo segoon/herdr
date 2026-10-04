@@ -2,8 +2,8 @@ use crate::api::schema::{ErrorResponse, Method, Request, ResponseResult, Success
 use crate::config::Config;
 use crate::events::{
     AppEvent, ExternalCheckoutCompletion, ExternalCheckoutContext,
-    ExternalCheckoutCreateReservation, ExternalCheckoutOutcome, ExternalCheckoutRemoveOperation,
-    ExternalCheckoutResult, ExternalCheckoutSource,
+    ExternalCheckoutCreateReservation, ExternalCheckoutFailure, ExternalCheckoutOutcome,
+    ExternalCheckoutRemoveOperation, ExternalCheckoutResult, ExternalCheckoutSource,
 };
 use crate::workspace::{CheckoutSpaceMembership, Workspace};
 
@@ -201,15 +201,17 @@ async fn failed_external_remove_restores_its_checkout_runtime() {
             respond_to,
         },
         completion: ExternalCheckoutCompletion::Remove {
-            operation: ExternalCheckoutRemoveOperation {
+            operation: Box::new(ExternalCheckoutRemoveOperation {
                 operation_id,
                 workspace_id: workspace_id.clone(),
                 checkout_key,
                 membership: app.state.workspaces[0].checkout_space.clone().unwrap(),
                 force: false,
-            },
+            }),
             shutdown_panes,
-            result: Err(("vcs_operation_failed".into(), "simulated failure".into())),
+            result: Err(ExternalCheckoutFailure::Provider(
+                crate::vcs::ProviderFailure::Protocol("simulated failure".into()),
+            )),
         },
     });
 
@@ -373,13 +375,13 @@ fn successful_remove_is_grandfathered_across_config_reload() {
             respond_to,
         },
         completion: ExternalCheckoutCompletion::Remove {
-            operation: ExternalCheckoutRemoveOperation {
+            operation: Box::new(ExternalCheckoutRemoveOperation {
                 operation_id,
                 workspace_id,
                 checkout_key,
                 membership: app.state.workspaces[0].checkout_space.clone().unwrap(),
                 force: false,
-            },
+            }),
             shutdown_panes: Vec::new(),
             result: Ok(()),
         },
@@ -401,14 +403,14 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
         let path = std::path::PathBuf::from("/repo/topic");
         let checkout_key = crate::worktree::canonical_or_original(&path);
         let workspace_id = "workspace".to_owned();
-        let error = ("checkout_outcome_unknown".into(), "timed out".into());
+        let error = ExternalCheckoutFailure::OutcomeUnknown("timed out".into());
         let completion = if removing {
             let operation_id = app
                 .checkout_requests
                 .reserve_remove(workspace_id.clone(), checkout_key.clone())
                 .unwrap();
             ExternalCheckoutCompletion::Remove {
-                operation: ExternalCheckoutRemoveOperation {
+                operation: Box::new(ExternalCheckoutRemoveOperation {
                     operation_id,
                     workspace_id: workspace_id.clone(),
                     checkout_key: checkout_key.clone(),
@@ -424,7 +426,7 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
                         source_workspace_id: None,
                     },
                     force: false,
-                },
+                }),
                 shutdown_panes: Vec::new(),
                 result: Err(error),
             }
@@ -472,4 +474,39 @@ fn unknown_mutation_outcome_keeps_reservation_quarantined() {
         }
         assert!(app.checkout_requests.reserve_create(other_path).is_ok());
     }
+}
+
+#[test]
+fn provider_error_text_cannot_quarantine_a_completed_mutation() {
+    let mut app = test_app();
+    let checkout_key = std::env::temp_dir().join("herdr-provider-error");
+    let operation_id = app
+        .checkout_requests
+        .reserve_create(checkout_key.clone())
+        .unwrap();
+    let (respond_to, response_rx) = std::sync::mpsc::channel();
+    let provider_error = serde_json::from_value(serde_json::json!({
+        "code": "checkout_outcome_unknown", "message": "provider-defined error",
+    }))
+    .unwrap();
+    app.handle_external_checkout_finished(ExternalCheckoutResult {
+        context: ExternalCheckoutContext {
+            id: "create".into(),
+            source: source(),
+            registry_generation: app.vcs_registry.generation(),
+            respond_to,
+        },
+        completion: ExternalCheckoutCompletion::ReadOrCreate {
+            creation: Some(ExternalCheckoutCreateReservation {
+                operation_id,
+                checkout_key: checkout_key.clone(),
+            }),
+            result: Err(ExternalCheckoutFailure::Provider(
+                crate::vcs::ProviderFailure::Provider(provider_error),
+            )),
+        },
+    });
+    let response: ErrorResponse = serde_json::from_str(&response_rx.recv().unwrap()).unwrap();
+    assert_eq!(response.error.code, "vcs_operation_failed");
+    assert!(app.checkout_requests.reserve_create(checkout_key).is_ok());
 }

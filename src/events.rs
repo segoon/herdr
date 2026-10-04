@@ -84,13 +84,23 @@ pub(crate) struct ExternalCheckoutResult {
 pub(crate) enum ExternalCheckoutCompletion {
     ReadOrCreate {
         creation: Option<ExternalCheckoutCreateReservation>,
-        result: Result<ExternalCheckoutOutcome, (String, String)>,
+        result: Result<ExternalCheckoutOutcome, ExternalCheckoutFailure>,
     },
     Remove {
-        operation: ExternalCheckoutRemoveOperation,
+        operation: Box<ExternalCheckoutRemoveOperation>,
         shutdown_panes: Vec<PaneId>,
-        result: Result<(), (String, String)>,
+        result: Result<(), ExternalCheckoutFailure>,
     },
+}
+
+/// Mutation uncertainty controls reservation retention independently of API text.
+#[derive(Debug)]
+pub(crate) enum ExternalCheckoutFailure {
+    Activation(crate::vcs::ProviderFailure),
+    Provider(crate::vcs::ProviderFailure),
+    OutcomeUnknown(String),
+    NotFound,
+    NotManaged,
 }
 
 #[derive(Debug)]
