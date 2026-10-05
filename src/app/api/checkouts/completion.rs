@@ -1,3 +1,5 @@
+use crate::vcs::CheckoutBackend;
+
 use crate::api::schema::{CheckoutInfo, ResponseResult, WorkspaceCloseParams};
 use crate::events::{
     ExternalCheckoutCompletion, ExternalCheckoutFailure, ExternalCheckoutOutcome,
@@ -6,7 +8,7 @@ use crate::events::{
 
 use super::super::responses::{encode_error, encode_success};
 use super::operations::{checkout_source_info, execute_checkout_remove};
-use crate::app::vcs_workspace::CheckoutWorkspaceCandidate;
+use crate::app::vcs_workspace::CheckoutWorkspaceSelection;
 use crate::app::App;
 
 impl App {
@@ -201,7 +203,7 @@ impl App {
                             &shutdown_panes,
                             operation.operation_id,
                             &operation.membership.checkout_path,
-                            crate::app::checkout_runtime::CheckoutBackendKind::External,
+                            CheckoutBackend::ExternalVcs,
                         );
                     }
                     match result {
@@ -232,7 +234,7 @@ impl App {
     ) -> String {
         let path = checkout.path.clone();
         let already = self.open_workspace_idx_for_external_checkout(&path);
-        let candidate = already.map(|index| CheckoutWorkspaceCandidate {
+        let candidate = already.map(|index| CheckoutWorkspaceSelection {
             index,
             created: false,
         });

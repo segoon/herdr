@@ -1,3 +1,5 @@
+use crate::vcs::CheckoutBackend;
+
 use super::*;
 
 pub(super) const MIN_TAB_WIDTH: u16 = 8;
@@ -424,7 +426,7 @@ pub(super) struct ClientSettingsOverlay {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeCreateOverlay {
-    pub(super) backend: ClientCheckoutBackend,
+    pub(super) backend: CheckoutBackend,
     pub(super) source_workspace_id: String,
     pub(super) repo_name: String,
     pub(super) branch: TextEditor,
@@ -480,7 +482,7 @@ impl ClientWorktreeOpenEntry {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeOpenOverlay {
-    pub(super) backend: ClientCheckoutBackend,
+    pub(super) backend: CheckoutBackend,
     pub(super) source_workspace_id: String,
     pub(super) entries: Vec<ClientWorktreeOpenEntry>,
     pub(super) selected: usize,
@@ -510,24 +512,12 @@ impl ClientWorktreeOpenOverlay {
 
 #[derive(Debug)]
 pub(super) struct ClientWorktreeRemoveOverlay {
-    pub(super) backend: ClientCheckoutBackend,
+    pub(super) backend: CheckoutBackend,
     pub(super) workspace_id: String,
     pub(super) path: String,
     pub(super) error: Option<String>,
     pub(super) removing: bool,
     pub(super) force_confirmation: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ClientCheckoutBackend {
-    GitWorktree,
-    ExternalVcs,
-}
-
-impl ClientCheckoutBackend {
-    pub(super) fn is_external(self) -> bool {
-        matches!(self, Self::ExternalVcs)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

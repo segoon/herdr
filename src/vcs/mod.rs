@@ -14,6 +14,19 @@ pub(crate) use path::{repository_key, ExactPath};
 pub(crate) use protocol::ProviderFailure;
 pub(crate) use provider::{ActivatedProvider, ExternalProvider};
 
+/// Backend shared by checkout dialogs and runtime recovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckoutBackend {
+    GitWorktree,
+    ExternalVcs,
+}
+
+impl CheckoutBackend {
+    pub(crate) fn is_external(self) -> bool {
+        matches!(self, Self::ExternalVcs)
+    }
+}
+
 /// Provider output after wire paths have been decoded and validated.
 #[derive(Debug, Clone)]
 pub(crate) struct Checkout {

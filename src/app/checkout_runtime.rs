@@ -2,14 +2,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::events::AppEvent;
+use crate::vcs::CheckoutBackend;
 
 use super::App;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CheckoutBackendKind {
-    Git,
-    External,
-}
 
 impl App {
     fn queue_checkout_runtime_restore_failed(
@@ -60,7 +55,7 @@ impl App {
         shutdown_panes: &[crate::layout::PaneId],
         operation_id: u64,
         removed_checkout: &Path,
-        backend: CheckoutBackendKind,
+        backend: CheckoutBackend,
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
         let mut pane_updates = Vec::new();
         let removed_checkout = crate::worktree::canonical_or_original(removed_checkout);
@@ -78,10 +73,10 @@ impl App {
             if runtime_missing {
                 let workspace = &self.state.workspaces[ws_idx];
                 let current_checkout = match backend {
-                    CheckoutBackendKind::Git => {
+                    CheckoutBackend::GitWorktree => {
                         workspace.worktree_space().map(|space| &space.checkout_path)
                     }
-                    CheckoutBackendKind::External => workspace
+                    CheckoutBackend::ExternalVcs => workspace
                         .checkout_space
                         .as_ref()
                         .map(|space| &space.checkout_path),

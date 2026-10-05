@@ -1,3 +1,5 @@
+use crate::vcs::CheckoutBackend;
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,7 +7,7 @@ use crate::api::schema::{
     EventData, EventEnvelope, EventKind, Request, ResponseResult, WorktreeCreateParams,
     WorktreeRemoveParams,
 };
-use crate::app::vcs_workspace::CheckoutWorkspaceCandidate;
+use crate::app::vcs_workspace::CheckoutWorkspaceSelection;
 use crate::app::App;
 use crate::events::{ApiWorktreeAddRequest, ApiWorktreeRemoveRequest, AppEvent};
 
@@ -400,7 +402,7 @@ impl App {
 
         let candidate = self
             .open_workspace_idx_for_checkout(&result.path)
-            .map(|index| CheckoutWorkspaceCandidate {
+            .map(|index| CheckoutWorkspaceSelection {
                 index,
                 created: false,
             });
@@ -488,7 +490,7 @@ impl App {
                 &api.shutdown_panes,
                 api.operation_id,
                 &result.path,
-                crate::app::checkout_runtime::CheckoutBackendKind::Git,
+                CheckoutBackend::GitWorktree,
             );
             let code =
                 if !result.forced && crate::worktree::is_dirty_worktree_remove_error(&message) {
@@ -543,7 +545,7 @@ impl App {
             &api.shutdown_panes,
             api.operation_id,
             &result.path,
-            crate::app::checkout_runtime::CheckoutBackendKind::Git,
+            CheckoutBackend::GitWorktree,
         );
 
         let Some(worktree) = worktree else {

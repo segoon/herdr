@@ -1,3 +1,5 @@
+use crate::vcs::CheckoutBackend;
+
 use super::*;
 use crate::protocol::{
     SurfaceGraphicsAsset, SurfaceGraphicsAssetKey, SurfaceGraphicsFormat, SurfaceGraphicsPlacement,
@@ -275,7 +277,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             filter: None,
         }),
         ClientShellOverlay::WorktreeCreate(ClientWorktreeCreateOverlay {
-            backend: ClientCheckoutBackend::GitWorktree,
+            backend: CheckoutBackend::GitWorktree,
             source_workspace_id: "ws_1".into(),
             repo_name: "repo".into(),
             branch: "branch".into(),
@@ -284,7 +286,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             creating: false,
         }),
         ClientShellOverlay::WorktreeOpen(ClientWorktreeOpenOverlay {
-            backend: ClientCheckoutBackend::GitWorktree,
+            backend: CheckoutBackend::GitWorktree,
             source_workspace_id: "ws_1".into(),
             entries: Vec::new(),
             selected: 0,
@@ -294,7 +296,7 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             opening: false,
         }),
         ClientShellOverlay::WorktreeRemove(ClientWorktreeRemoveOverlay {
-            backend: ClientCheckoutBackend::GitWorktree,
+            backend: CheckoutBackend::GitWorktree,
             workspace_id: "ws_1".into(),
             path: "path".into(),
             error: None,

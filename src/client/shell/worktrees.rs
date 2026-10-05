@@ -1,3 +1,5 @@
+use crate::vcs::CheckoutBackend;
+
 use super::*;
 
 fn checkout_path_preview(root: &str, repo: &str, branch: &str) -> String {
@@ -29,7 +31,7 @@ impl ClientShellState {
             .unwrap_or_else(|| "VCS".into());
         self.overlay = Some(ClientShellOverlay::WorktreeCreate(
             ClientWorktreeCreateOverlay {
-                backend: ClientCheckoutBackend::ExternalVcs,
+                backend: CheckoutBackend::ExternalVcs,
                 source_workspace_id: workspace_id,
                 repo_name: provider_name,
                 branch: TextEditor::new("checkout", true),
@@ -76,7 +78,7 @@ impl ClientShellState {
             .unwrap_or_else(|| "checkout path unavailable".into());
         self.overlay = Some(ClientShellOverlay::WorktreeRemove(
             ClientWorktreeRemoveOverlay {
-                backend: ClientCheckoutBackend::ExternalVcs,
+                backend: CheckoutBackend::ExternalVcs,
                 workspace_id,
                 path: checkout_path,
                 error: None,
@@ -541,7 +543,7 @@ impl ClientShellState {
 
     fn open_checkout_selection(
         &mut self,
-        backend: ClientCheckoutBackend,
+        backend: CheckoutBackend,
         workspace_id: String,
         entries: Vec<ClientWorktreeOpenEntry>,
         empty_message: &str,
@@ -589,7 +591,7 @@ impl ClientShellState {
                     checkout_path_preview(&worktree_directory, &source.repo_name, &branch);
                 self.overlay = Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
-                        backend: ClientCheckoutBackend::GitWorktree,
+                        backend: CheckoutBackend::GitWorktree,
                         source_workspace_id: workspace_id,
                         repo_name: source.repo_name,
                         branch: TextEditor::new(&branch, true),
@@ -621,7 +623,7 @@ impl ClientShellState {
                     })
                     .collect::<Vec<_>>();
                 self.open_checkout_selection(
-                    ClientCheckoutBackend::GitWorktree,
+                    CheckoutBackend::GitWorktree,
                     workspace_id,
                     entries,
                     "No Git worktrees found for this repo.",
@@ -639,7 +641,7 @@ impl ClientShellState {
                 if let Some(path) = path {
                     self.overlay = Some(ClientShellOverlay::WorktreeRemove(
                         ClientWorktreeRemoveOverlay {
-                            backend: ClientCheckoutBackend::GitWorktree,
+                            backend: CheckoutBackend::GitWorktree,
                             workspace_id,
                             path,
                             error: None,
@@ -671,7 +673,7 @@ impl ClientShellState {
                     })
                     .collect::<Vec<_>>();
                 self.open_checkout_selection(
-                    ClientCheckoutBackend::ExternalVcs,
+                    CheckoutBackend::ExternalVcs,
                     workspace_id,
                     entries,
                     "No checkouts found for this repository.",

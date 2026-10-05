@@ -2,19 +2,12 @@ use std::path::Path;
 
 use super::App;
 
-/// An existing workspace that can receive a VCS checkout membership.
+/// A workspace selected for a checkout, with its creation provenance.
 ///
-/// `created` is true when source resolution created the workspace earlier in
-/// the same operation. Keeping that fact explicit prevents the common
-/// lifecycle from emitting duplicate workspace-open events.
+/// `created` records whether this operation created the workspace, including
+/// during source resolution, so finalization emits creation events only once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CheckoutWorkspaceCandidate {
-    pub(crate) index: usize,
-    pub(crate) created: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CheckoutWorkspaceOpen {
+pub(crate) struct CheckoutWorkspaceSelection {
     pub(crate) index: usize,
     pub(crate) created: bool,
 }
@@ -28,9 +21,9 @@ impl App {
     pub(crate) fn open_or_create_checkout_workspace(
         &mut self,
         path: &Path,
-        candidate: Option<CheckoutWorkspaceCandidate>,
+        candidate: Option<CheckoutWorkspaceSelection>,
         focus: bool,
-    ) -> Result<CheckoutWorkspaceOpen, String> {
+    ) -> Result<CheckoutWorkspaceSelection, String> {
         if let Some(candidate) = candidate {
             if self.state.workspaces.get(candidate.index).is_none() {
                 return Err("checkout workspace changed while the operation was running".into());
@@ -38,14 +31,11 @@ impl App {
             if focus {
                 self.state.switch_workspace(candidate.index);
             }
-            return Ok(CheckoutWorkspaceOpen {
-                index: candidate.index,
-                created: candidate.created,
-            });
+            return Ok(candidate);
         }
 
         self.create_workspace_with_options(path.to_path_buf(), focus)
-            .map(|index| CheckoutWorkspaceOpen {
+            .map(|index| CheckoutWorkspaceSelection {
                 index,
                 created: true,
             })
@@ -54,7 +44,7 @@ impl App {
 
     /// Applies provider-neutral state changes after the backend membership has
     /// been attached to the selected workspace.
-    pub(crate) fn finalize_checkout_workspace_open(&mut self, opened: CheckoutWorkspaceOpen) {
+    pub(crate) fn finalize_checkout_workspace_open(&mut self, opened: CheckoutWorkspaceSelection) {
         self.state.mark_session_dirty();
         if opened.created {
             self.emit_workspace_open_events(opened.index);
@@ -110,7 +100,7 @@ mod tests {
         let opened = app
             .open_or_create_checkout_workspace(
                 Path::new("/checkout"),
-                Some(CheckoutWorkspaceCandidate {
+                Some(CheckoutWorkspaceSelection {
                     index: 1,
                     created: false,
                 }),

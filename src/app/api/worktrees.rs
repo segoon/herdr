@@ -4,7 +4,7 @@ use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorktreeInfo, WorktreeOpenParams,
     WorktreeSourceInfo,
 };
-use crate::app::vcs_workspace::CheckoutWorkspaceCandidate;
+use crate::app::vcs_workspace::CheckoutWorkspaceSelection;
 use crate::app::App;
 
 use super::responses::{encode_error, encode_success};
@@ -100,12 +100,12 @@ impl App {
                 Err(err) => return encode_error(id, err.code, err.message),
             };
         let candidate = if let Some(ws_idx) = already_open {
-            Some(CheckoutWorkspaceCandidate {
+            Some(CheckoutWorkspaceSelection {
                 index: ws_idx,
                 created: false,
             })
         } else if target_is_source {
-            Some(CheckoutWorkspaceCandidate {
+            Some(CheckoutWorkspaceSelection {
                 index: source
                     .workspace_idx
                     .expect("source workspace should exist after membership ensure"),
